@@ -225,19 +225,68 @@ fn prune_auto_snapshots(meta: &mut Metadata, store: &Storage) -> Result<()> {
     let victims: Vec<SnapshotRecord> = autos.split_off(AUTO_SAFETY_KEEP);
     meta.snapshots
         .retain(|s| !victims.iter().any(|v| v.id == s.id));
-    let referenced: HashSet<&str> = meta
+    remove_records(store, meta, &victims);
+    Ok(())
+}
+
+/// Delete a set of victim records' artifacts. Anything still referenced by a
+/// surviving record is kept (dedup-linked snapshots share files and chunks —
+/// §4-T13). Returns (records removed, bytes freed).
+fn remove_records(
+    store: &Storage,
+    survivors: &Metadata,
+    victims: &[SnapshotRecord],
+) -> (usize, u64) {
+    let survivor_files: HashSet<&str> = survivors
         .snapshots
         .iter()
         .filter_map(|s| s.file_path())
         .collect();
-    for v in victims {
-        if let Some(p) = v.file_path() {
-            if !referenced.contains(p) {
-                fs::remove_file(store.root.join(p)).ok();
+    let mut survivor_manifests: HashSet<&str> = HashSet::new();
+    let mut survivor_chunks: HashSet<String> = HashSet::new();
+    for s in &survivors.snapshots {
+        if let crate::storage::Location::Manifest { path } = &s.location {
+            survivor_manifests.insert(path.as_str());
+            if let Ok(m) = store.read_manifest_file(path) {
+                survivor_chunks.extend(m.hexes());
             }
         }
     }
-    Ok(())
+
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    for v in victims {
+        match &v.location {
+            crate::storage::Location::File { path } => {
+                if !survivor_files.contains(path.as_str())
+                    && fs::remove_file(store.root.join(path)).is_ok()
+                {
+                    freed += v.size_bytes;
+                }
+            }
+            crate::storage::Location::Manifest { path } => {
+                if !survivor_manifests.contains(path.as_str()) {
+                    // Free the manifest's unique chunks, then the manifest.
+                    if let Ok(m) = store.read_manifest_file(path) {
+                        for hex in m.hexes() {
+                            if !survivor_chunks.contains(&hex) {
+                                let chunk = store.chunk_path(&hex);
+                                if let Ok(md) = fs::metadata(&chunk) {
+                                    let size = md.len();
+                                    if fs::remove_file(&chunk).is_ok() {
+                                        freed += size;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    fs::remove_file(store.root.join(path)).ok();
+                }
+            }
+        }
+        removed += 1;
+    }
+    (removed, freed)
 }
 
 pub fn list_at(root: &Path, explicit: Option<&str>) -> Result<String> {
@@ -261,7 +310,15 @@ pub fn list_with(ctx: &Ctx) -> Result<String> {
         .collect();
     let mut sizes: Vec<String> = snaps
         .iter()
-        .map(|s| util::format_size(s.size_bytes))
+        .map(|s| {
+            let size = util::format_size(s.size_bytes);
+            // delta snapshots: "+" marks the incremental cost of this snapshot
+            if s.is_delta() {
+                format!("+{size}")
+            } else {
+                size
+            }
+        })
         .collect();
     for col in [&mut ids, &mut tags, &mut createds, &mut sizes] {
         let width = col.iter().map(|c| c.chars().count()).max().unwrap_or(0);
@@ -306,21 +363,9 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
     let mut removed = 0usize;
     if keep < meta.snapshots.len() {
         let victims: Vec<SnapshotRecord> = meta.snapshots.split_off(keep);
-        let referenced: HashSet<&str> = meta
-            .snapshots
-            .iter()
-            .filter_map(|s| s.file_path())
-            .collect();
-        for v in victims {
-            if let Some(p) = v.file_path() {
-                // Never touch files still referenced by a surviving snapshot
-                // (§4-T13 — dedup-linked snapshots share files).
-                if !referenced.contains(p) && fs::remove_file(ctx.store.root.join(p)).is_ok() {
-                    freed += v.size_bytes;
-                    removed += 1;
-                }
-            }
-        }
+        let (n, f) = remove_records(&ctx.store, &meta, &victims);
+        removed = n;
+        freed = f;
     }
     clean_tmp(&ctx.store);
     ctx.store.write_metadata(&meta)?;
@@ -362,6 +407,10 @@ pub fn status_with(ctx: &Ctx) -> Result<String> {
     let tmp_leftovers = fs::read_dir(ctx.store.tmp_dir())
         .map(|rd| rd.flatten().count())
         .unwrap_or(0);
+    let (objects, object_bytes) = scan_dir_size(&ctx.store.objects_dir());
+    let manifests = fs::read_dir(ctx.store.manifests_dir())
+        .map(|rd| rd.flatten().count())
+        .unwrap_or(0);
 
     let size = info
         .size_bytes
@@ -374,15 +423,36 @@ pub fn status_with(ctx: &Ctx) -> Result<String> {
         .unwrap_or_default();
 
     Ok(format!(
-        "database  : {} ({})\nengine    : {}{}\nsnapshots : {} ({} unique files, {} on disk)\ntmp       : {tmp_leftovers} leftover files{free}",
+        "database  : {} ({})\nengine    : {}{}\nsnapshots : {} ({} unique files, {} on disk)\ndelta     : {manifests} manifests, {objects} chunks ({})\ntmp       : {tmp_leftovers} leftover files{free}",
         ctx.db.engine,
         ctx.db.path.display(),
         info.detail,
         size,
         meta.snapshots.len(),
         unique_files.len(),
-        util::format_size(on_disk)
+        util::format_size(on_disk),
+        util::format_size(object_bytes),
     ))
+}
+
+/// (file count, total bytes) of a directory tree.
+fn scan_dir_size(dir: &Path) -> (usize, u64) {
+    let mut count = 0usize;
+    let mut total = 0u64;
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let (c, t) = scan_dir_size(&path);
+                count += c;
+                total += t;
+            } else if let Ok(md) = entry.metadata() {
+                count += 1;
+                total += md.len();
+            }
+        }
+    }
+    (count, total)
 }
 
 fn clean_tmp(store: &Storage) {

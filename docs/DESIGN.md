@@ -144,7 +144,7 @@ pub trait DatabaseEngine: Send + Sync {
   ]
 }
 ```
-- `location.kind`: `"file"` (SQLite/MySQL/PG-dump — path relatif `.dbsnap/`), `"manifest"` (delta CAS, v0.2+), atau `"pg_database"` (server-side).
+- `location.kind`: `"file"` (SQLite/MySQL/PG-dump — path relatif `.dbsnap/`), `"manifest"` (delta CAS, sejak v0.1.5), atau `"pg_database"` (server-side).
 - **Tidak ada kredensial yang pernah disimpan** — fingerprint hanya engine+host+port+database (SQLite: path absolut kanonikal).
 - Penulisan metadata selalu *atomic*: tulis `.dbsnap/tmp/metadata.json.tmp` → `rename` (anti-torn, §4-T4).
 
@@ -159,7 +159,7 @@ pub trait DatabaseEngine: Send + Sync {
 ├── snapshots/
 │   └── <id>.zst       # mode full-copy (v0.1): NAMA FILE HANYA ID — tag hidup di metadata (§4-T9)
 ├── manifests/
-│   └── <id>.m         # mode delta (v0.2+, §3.5): daftar hash chunk, binari
+│   └── <id>.m         # mode delta (v0.1.5+, §3.5): daftar hash chunk, binari
 └── objects/
     └── <hash[0:2]>/<hash>   # chunk 64KB ter-zstd — content-addressed, dibagi antar snapshot
 ```
@@ -178,7 +178,7 @@ Tokio disempitkan dari `features = ["full"]` menjadi `["rt-multi-thread", "macro
 
 ---
 
-### 3.5 Mesin Snapshot Delta — Content-Addressed Storage (CAS) [v0.2+]
+### 3.5 Mesin Snapshot Delta — Content-Addressed Storage (CAS) [sejak v0.1.5]
 
 **Masalah:** full-copy per snapshot membuat latensi save dan pemakaian disk tumbuh linear terhadap ukuran DB (DB 1 GB × 20 snapshot ≈ +5 GB, tiap save 3–5 detik).
 

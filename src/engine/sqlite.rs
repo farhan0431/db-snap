@@ -1,5 +1,5 @@
 use super::{DatabaseEngine, EngineInfo, SaveOutcome};
-use crate::storage::{compress, Location, SnapshotRecord, SourceState, Storage};
+use crate::storage::{cas, compress, Location, SnapshotRecord, SourceState, Storage};
 use crate::util;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -116,53 +116,73 @@ impl DatabaseEngine for SqliteEngine {
             backup.run_to_completion(BACKUP_PAGES_PER_STEP, Duration::from_millis(0), None)?;
         }
 
-        let out_path = store.snapshots_dir().join(format!("{id}.zst"));
-        let (original_bytes, size_bytes, hash) = compress::compress_to(&staged, &out_path)?;
-        std::fs::remove_file(&staged).ok();
-
-        // Content dedup: identical bytes to the previous snapshot link to it
-        // instead of doubling storage.
-        let (location, linked) = match previous {
-            Some(prev) if prev.blake3 == hash => {
-                std::fs::remove_file(&out_path).ok();
-                (prev.location.clone(), true)
+        // Delta snapshot: hash 64 KB page-aligned chunks, write only the
+        // chunks missing from the store, and record a manifest (§3.5).
+        // Identical content to the previous delta snapshot writes nothing.
+        let prev_content_id = previous.filter(|p| p.is_delta()).map(|p| p.blake3.clone());
+        match cas::save_delta(store, &staged, &id, prev_content_id.as_deref())? {
+            cas::DeltaOutcome::Identical { .. } => {
+                std::fs::remove_file(&staged).ok();
+                let Some(prev) = previous else {
+                    bail!("identical content reported without a previous snapshot");
+                };
+                let mut record = prev.clone();
+                record.id = id;
+                record.tag = tag.to_string();
+                record.created_at = Utc::now();
+                Ok(SaveOutcome {
+                    record,
+                    linked: true,
+                })
             }
-            _ => (
-                Location::File {
-                    path: format!("snapshots/{id}.zst"),
-                },
-                false,
-            ),
-        };
-
-        Ok(SaveOutcome {
-            record: SnapshotRecord {
-                id,
-                tag: tag.to_string(),
-                created_at: Utc::now(),
-                engine: "sqlite".to_string(),
-                location,
-                size_bytes,
-                original_bytes,
-                blake3: hash,
-                method: "sqlite-backup".to_string(),
-                source_state: current_state,
-            },
-            linked,
-        })
+            cas::DeltaOutcome::Written {
+                manifest_rel,
+                manifest_size,
+                written_bytes,
+                content_id,
+                original_size,
+            } => {
+                std::fs::remove_file(&staged).ok();
+                Ok(SaveOutcome {
+                    record: SnapshotRecord {
+                        id,
+                        tag: tag.to_string(),
+                        created_at: Utc::now(),
+                        engine: "sqlite".to_string(),
+                        location: Location::Manifest { path: manifest_rel },
+                        size_bytes: manifest_size + written_bytes,
+                        original_bytes: original_size,
+                        blake3: content_id,
+                        method: "sqlite-delta".to_string(),
+                        source_state: current_state,
+                    },
+                    linked: false,
+                })
+            }
+        }
     }
 
     fn stage_restore(&self, store: &Storage, record: &SnapshotRecord) -> Result<PathBuf> {
-        let src = store.snapshot_path(record)?;
-        if !src.exists() {
-            bail!(
-                "snapshot file {} is missing on disk — the snapshot catalog may be out of sync",
-                src.display()
-            );
+        match &record.location {
+            Location::File { path } => {
+                let src = store.root.join(path);
+                if !src.exists() {
+                    bail!(
+                        "snapshot file {} is missing on disk — the snapshot catalog may be out of sync",
+                        src.display()
+                    );
+                }
+                let staged = store.tmp_dir().join(format!("restore-{}.db", record.id));
+                compress::decompress_verified(&src, &staged, &record.blake3)?;
+                Ok(staged)
+            }
+            Location::Manifest { path } => {
+                // Reassembles from the chunk store, verifying every chunk
+                // (per-chunk integrity, design §4-T3).
+                let (staged, _) = cas::stage_from_manifest(store, path, &record.id)?;
+                Ok(staged)
+            }
         }
-        let staged = store.tmp_dir().join(format!("restore-{}.db", record.id));
-        compress::decompress_verified(&src, &staged, &record.blake3)?;
-        Ok(staged)
     }
 
     fn apply_restore(&self, staged: &Path) -> Result<()> {

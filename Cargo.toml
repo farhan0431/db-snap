@@ -1,6 +1,6 @@
 [package]
 name = "dbsnap"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 description = "Instant physical database time-machine and MCP server for AI coding agents"
 license = "MIT"

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
+pub mod cas;
 pub mod compress;
 
 pub const DBSNAP_DIR: &str = ".dbsnap";
@@ -16,12 +17,15 @@ const LOCK_WAIT_MS: u64 = 10_000;
 /// Project binding persisted in config.json (design §3.2).
 pub use crate::config::Fingerprint;
 
-/// Where a snapshot's bytes live. v0.1 only writes files; `manifest` and
-/// `pg_database` arrive with the delta engine (§3.5) and PostgreSQL (§2.2).
+/// Where a snapshot's bytes live. `file` = v0.1 single-file snapshot
+/// (still restorable); `manifest` = delta snapshot over the content-addressed
+/// chunk store (§3.5, default since v0.1.5); `pg_database` arrives with
+/// PostgreSQL (§2.2).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Location {
     File { path: String },
+    Manifest { path: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +54,21 @@ impl SnapshotRecord {
     pub fn file_path(&self) -> Option<&str> {
         match &self.location {
             Location::File { path } => Some(path),
+            Location::Manifest { .. } => None,
         }
+    }
+
+    /// Relative path (inside .dbsnap/) of the record's primary artifact:
+    /// the .zst file for file snapshots, the manifest for delta snapshots.
+    pub fn artifact_rel(&self) -> &str {
+        match &self.location {
+            Location::File { path } | Location::Manifest { path } => path,
+        }
+    }
+
+    /// True when this record is a delta snapshot over the chunk store.
+    pub fn is_delta(&self) -> bool {
+        matches!(self.location, Location::Manifest { .. })
     }
 }
 
@@ -162,6 +180,8 @@ impl Storage {
         let root = start.join(DBSNAP_DIR);
         fs::create_dir_all(root.join("snapshots"))?;
         fs::create_dir_all(root.join("tmp"))?;
+        fs::create_dir_all(root.join("objects"))?;
+        fs::create_dir_all(root.join("manifests"))?;
         let config = serde_json::json!({
             "version": 1,
             "project_fingerprint": fingerprint,
@@ -206,11 +226,9 @@ impl Storage {
         self.root.join("tmp")
     }
 
+    /// Absolute path of a record's primary artifact (.zst file or manifest).
     pub fn snapshot_path(&self, record: &SnapshotRecord) -> Result<PathBuf> {
-        match record.file_path() {
-            Some(rel) => Ok(self.root.join(rel)),
-            None => bail!("snapshot {} is not file-backed", record.id),
-        }
+        Ok(self.root.join(record.artifact_rel()))
     }
 
     /// Exclusive cross-process lock held for the duration of any mutating

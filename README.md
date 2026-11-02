@@ -61,8 +61,10 @@ Snapshots live in `.dbsnap/` (auto-added to `.gitignore`):
 ```text
 .dbsnap/
 ├── config.json     # which database this project is bound to
-├── metadata.json   # snapshot catalog (id, tag, time, size, blake3 hash)
-└── snapshots/      # <id>.zst — zstd-compressed, hash-verified
+├── metadata.json   # snapshot catalog (id, tag, time, size, blake3)
+├── manifests/      # delta snapshots: ordered chunk-hash lists
+├── objects/        # 64 KB chunks, content-addressed & shared between snapshots
+└── snapshots/      # (legacy v0.1 single-file snapshots, still restorable)
 ```
 
 ## MCP — let the AI agent protect itself
@@ -119,16 +121,19 @@ apply it across every project. The canonical copy lives in
 
 ## How it works
 
-- **Save:** SQLite Online Backup API → page-consistent copy → zstd (level 3)
-  → blake3 hash. Unchanged databases are *linked*, not copied — identical
-  consecutive snapshots cost zero extra storage.
-- **Restore:** verify hash → decompress to a staging file → Backup API into
-  the live database (works even on Windows while the file is open) →
-  `PRAGMA wal_checkpoint(TRUNCATE)` so your dev server sees the new state
-  immediately.
-- **Coming (v0.1.5):** content-addressed delta snapshots — snapshot = a small
-  manifest of chunk hashes, so a 1 GB database snapshot takes <1 s and adds
-  kilobytes, not gigabytes. See [docs/DESIGN.md §3.5](docs/DESIGN.md).
+- **Save:** SQLite Online Backup API → page-consistent copy → the file is
+  chunked into **64 KB page-aligned blocks** (blake3-hashed) → only chunks
+  not already in the store are written (zstd). A snapshot is a small manifest
+  of chunk hashes, so a fresh snapshot costs roughly one pass over the file
+  and an incremental one costs kilobytes–megabytes — *not* the whole database.
+  Unchanged databases are *linked* with zero I/O (`PRAGMA data_version`
+  short-circuit).
+- **Restore:** reassemble from the chunk store, verifying every chunk's hash
+  on the way → Backup API into the live database (works even on Windows while
+  the file is open) → `PRAGMA wal_checkpoint(TRUNCATE)` so your dev server
+  sees the new state immediately.
+- **Prune** is a real GC: chunks shared by surviving snapshots are never
+  deleted. Full design: [docs/DESIGN.md §3.5](docs/DESIGN.md).
 
 ## Development
 
@@ -142,7 +147,7 @@ scripts/e2e.sh    # hot snapshot/rollback while a live "dev server" writes to th
 ## Roadmap
 
 - [x] **v0.1.0** — SQLite engine, CLI, MCP server, npm distribution
-- [ ] **v0.1.5** — delta snapshots (content-addressed storage)
+- [x] **v0.1.5** — delta snapshots (content-addressed storage, 64 KB page-aligned chunks)
 - [ ] **v0.2.0** — PostgreSQL (server-side template cloning + `pg_dump`)
 - [ ] **v0.3.0** — MySQL/MariaDB (consistent logical dumps)
 
