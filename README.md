@@ -91,6 +91,16 @@ The agent gets four tools:
 | `dbsnap_list_snapshots` | Show available restore points. |
 | `dbsnap_status` | Show which database is protected before touching anything. |
 
+### Agent skill (automatic)
+
+`dbsnap init` also installs an **agent skill** at
+`.agents/skills/dbsnap/SKILL.md` — a short instruction file that AI editors
+(Claude Code, Cursor, ZCode, …) pick up on their own, teaching them the
+workflow: *snapshot before migrations, restore on failure*. Copy it to
+`~/.claude/skills/dbsnap/SKILL.md` (or your agent's global skills folder) to
+apply it across every project. The canonical copy lives in
+[`skill/dbsnap/SKILL.md`](skill/dbsnap/SKILL.md).
+
 ## Safety guarantees (the "don't wreck my project" list)
 
 - **Local-only by default.** Only `localhost` / private-network databases can
@@ -126,6 +136,7 @@ The agent gets four tools:
 cargo test        # 17 tests: engine cycle, corruption, dedup, prune, MCP stdio
 cargo clippy --all-targets -- -D warnings
 cargo build --release
+scripts/e2e.sh    # hot snapshot/rollback while a live "dev server" writes to the DB
 ```
 
 ## Roadmap

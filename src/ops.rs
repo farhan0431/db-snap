@@ -7,6 +7,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+/// Agent-facing skill installed into the project on `dbsnap init` — teaches
+/// AI agents when and how to snapshot/restore.
+const AGENT_SKILL_MD: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/skill/dbsnap/SKILL.md"
+));
+
 /// Everything a command needs: the resolved database and its `.dbsnap/`.
 pub struct Ctx {
     pub db: ResolvedDb,
@@ -78,6 +85,23 @@ pub fn init_at(root: &Path, explicit: Option<&str>) -> Result<String> {
     }
 
     msg.push_str("\n  git      : .dbsnap/ registered in .gitignore");
+
+    // Install the agent skill so AI editors pick up the workflow automatically.
+    let skill_path = root
+        .join(".agents")
+        .join("skills")
+        .join("dbsnap")
+        .join("SKILL.md");
+    if !skill_path.exists() {
+        if let Some(parent) = skill_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&skill_path, AGENT_SKILL_MD)?;
+        msg.push_str(&format!(
+            "\n  agent    : skill installed at {}",
+            skill_path.display()
+        ));
+    }
     msg.push_str("\nnext: dbsnap save \"initial-seed\"");
     Ok(msg)
 }
