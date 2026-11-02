@@ -1,6 +1,6 @@
 ---
 name: dbsnap
-description: Database time-machine for the local development database (instant physical snapshot / rollback) for SQLite and PostgreSQL. Use when about to run schema migrations, DDL (ALTER TABLE, DROP COLUMN), bulk data changes, reseed scripts, or ORM migrate commands — or when the database is broken/corrupted and must be restored. Covers the dbsnap CLI and the dbsnap_* MCP tools.
+description: Database time-machine for the local development database (instant physical snapshot / rollback) for SQLite, PostgreSQL, and MySQL/MariaDB. Use when about to run schema migrations, DDL (ALTER TABLE, DROP COLUMN), bulk data changes, reseed scripts, or ORM migrate commands — or when the database is broken/corrupted and must be restored. Covers the dbsnap CLI and the dbsnap_* MCP tools.
 ---
 
 # dbsnap — database time-machine for this project
@@ -9,8 +9,9 @@ dbsnap takes **physical snapshots** of the local development database and
 restores them bit-for-bit — like git commit / git checkout for data. Unlike
 query-level undo, it works after `DROP COLUMN`, botched migrations, and broken
 foreign keys, and it is safe to run **while the dev server is still running**.
-Engines: SQLite (delta snapshots, milliseconds) and PostgreSQL (server-side
-template clones, ~1 s with a brief connection blackout).
+Engines: SQLite (delta snapshots, milliseconds), PostgreSQL (server-side
+template clones, ~1 s with a brief connection blackout), and MySQL/MariaDB
+(consistent logical dumps, seconds on big databases).
 
 ## Golden rules
 

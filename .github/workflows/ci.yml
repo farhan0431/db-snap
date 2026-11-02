@@ -49,3 +49,51 @@ jobs:
         run: cargo test
         env:
           DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@localhost:5433/dbsnap_admin
+
+  test-mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: dbsnap
+          MYSQL_DATABASE: dbsnap_admin
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -uroot -pdbsnap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests (MySQL engine)
+        run: cargo test
+        env:
+          DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/dbsnap_admin
+
+  test-mariadb:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: dbsnap
+          MARIADB_DATABASE: dbsnap_admin
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests (MariaDB engine)
+        run: cargo test
+        env:
+          DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/dbsnap_admin

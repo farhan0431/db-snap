@@ -1,3 +1,4 @@
+pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
@@ -43,8 +44,7 @@ pub struct RestoreOutcome {
     pub safety: Option<SnapshotRecord>,
 }
 
-/// Engine seam (design §3.1) — SQLite, PostgreSQL now; MySQL/MariaDB joins
-/// through this same trait in v0.3.
+/// Engine seam (design §3.1) — SQLite, PostgreSQL, MySQL/MariaDB.
 pub trait DatabaseEngine: Send + Sync {
     fn probe(&self) -> Result<EngineInfo>;
 
@@ -76,5 +76,6 @@ pub fn make(db: &ResolvedDb) -> Result<Box<dyn DatabaseEngine>> {
     match &db.target {
         DbTarget::Sqlite(path) => Ok(Box::new(sqlite::SqliteEngine::new(path.clone()))),
         DbTarget::Postgres(pg) => Ok(Box::new(postgres::PostgresEngine::new(pg.clone()))),
+        DbTarget::Mysql(m) => Ok(Box::new(mysql::MysqlEngine::new(m.clone()))),
     }
 }

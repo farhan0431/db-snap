@@ -631,3 +631,148 @@ fn postgres_dump_roundtrip() -> Result<()> {
     pg_drop_test_db(&url);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// MySQL/MariaDB — dijalankan hanya bila DBSNAP_TEST_MYSQL_URL menunjuk
+// server uji lokal (CI: service mysql:8 / mariadb:11; lokal: server sendiri).
+// Kontrol-plane memakai spawned client `mysql`, sesuai desain §2.3.
+// ---------------------------------------------------------------------------
+
+struct MyParts {
+    host: String,
+    port: String,
+    user: String,
+    password: String,
+}
+
+fn my_parts(url: &str) -> MyParts {
+    let rest = url
+        .strip_prefix("mysql://")
+        .or_else(|| url.strip_prefix("mariadb://"))
+        .unwrap_or(url);
+    let (auth, hostport_db) = rest.split_once('@').unwrap_or(("", rest));
+    let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
+    let (hostport, _db) = hostport_db.split_once('/').unwrap_or((hostport_db, ""));
+    let (host, port) = hostport.split_once(':').unwrap_or((hostport, "3306"));
+    MyParts {
+        host: host.trim_matches('[').trim_matches(']').to_string(),
+        port: port.to_string(),
+        user: user.to_string(),
+        password: password.to_string(),
+    }
+}
+
+fn my_run(url: &str, db: Option<&str>, sql: &str) -> Result<String> {
+    use std::process::Command;
+    let p = my_parts(url);
+    let mut cmd = Command::new("mysql");
+    cmd.args([
+        "-h", &p.host, "-P", &p.port, "-u", &p.user, "-N", "-B", "-e", sql,
+    ])
+    .env("MYSQL_PWD", &p.password);
+    if let Some(db) = db {
+        cmd.arg(db);
+    }
+    let out = cmd.output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "mysql failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn my_test_url() -> Option<String> {
+    match std::env::var("DBSNAP_TEST_MYSQL_URL") {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        _ => None,
+    }
+}
+
+/// Setiap test MySQL mendapat database unik sendiri (test berjalan paralel
+/// terhadap server yang sama).
+fn my_setup_test_db(test: &str) -> Option<String> {
+    let base = my_test_url()?;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dbname = format!(
+        "dbsnap_t{}_{}_{}",
+        test.replace('-', "_"),
+        std::process::id(),
+        n
+    );
+    my_run(
+        &base,
+        None,
+        &format!("DROP DATABASE IF EXISTS {dbname}; CREATE DATABASE {dbname};"),
+    )
+    .ok()?;
+    let prefix = base.rsplit_once('/').map(|(p, _)| p.to_string())?;
+    Some(format!("{prefix}/{dbname}"))
+}
+
+fn my_drop_test_db(url: &str) {
+    if let Some(prefix) = url.rsplit_once('/').map(|(p, _)| p.to_string()) {
+        let dbname = url.rsplit('/').next().unwrap_or("");
+        let _ = my_run(&prefix, None, &format!("DROP DATABASE IF EXISTS {dbname};"));
+    }
+}
+
+fn my_count(url: &str) -> Result<i64> {
+    let db = url.rsplit('/').next().unwrap_or("");
+    Ok(my_run(url, Some(db), "SELECT COUNT(*) FROM items")?
+        .trim()
+        .parse()
+        .unwrap_or(-1))
+}
+
+#[test]
+fn mysql_dump_roundtrip() -> Result<()> {
+    let Some(url) = my_setup_test_db("dump") else {
+        return Ok(());
+    };
+    let root = temp_root();
+    let db = url.rsplit('/').next().unwrap_or("").to_string();
+
+    my_exec_url(
+        &url,
+        Some(&db),
+        "DROP TABLE IF EXISTS items;
+         CREATE TABLE items (id INT PRIMARY KEY, v TEXT);
+         INSERT INTO items VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');",
+    )?;
+
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "myv1")?;
+    let rec = record_by_tag(&root, "myv1");
+    assert_eq!(rec.method, "mysql-dump");
+
+    // migrasi destruktif: kolom v hilang bersama datanya
+    my_exec_url(&url, Some(&db), "ALTER TABLE items DROP COLUMN v;")?;
+
+    restore(&root, Path::new(&url), Some("myv1"), true)?;
+    assert_eq!(my_count(&url)?, 5, "dump restore must bring data back");
+
+    // kolom v benar-benar kembali
+    let v = my_run(&url, Some(&db), "SELECT v FROM items WHERE id = 1")?
+        .trim()
+        .to_string();
+    assert_eq!(v, "a");
+
+    // safety snapshot tercatat
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let meta = store.load_metadata()?;
+    assert!(meta
+        .snapshots
+        .iter()
+        .any(|s| s.tag.starts_with("auto-before-restore-")));
+
+    my_drop_test_db(&url);
+    Ok(())
+}
+
+/// Helper dengan URL (password via MYSQL_PWD di dalam my_run) — dipakai
+/// setup di atas.
+fn my_exec_url(url: &str, db: Option<&str>, sql: &str) -> Result<()> {
+    my_run(url, db, sql).map(|_| ())
+}

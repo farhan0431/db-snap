@@ -1,4 +1,4 @@
-use crate::config::{self, DbTarget, PgTarget, ResolvedDb};
+use crate::config::{self, DbTarget, ResolvedDb, ServerTarget};
 use crate::engine;
 use crate::storage::{Metadata, SnapshotRecord, Storage};
 use crate::util;
@@ -152,7 +152,7 @@ pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> 
             "server-side clone, {} in database",
             util::format_size(r.original_bytes)
         ),
-        "pg-dump" => format!(
+        "pg-dump" | "mysql-dump" => format!(
             "{} dump ({} original)",
             util::format_size(r.size_bytes),
             util::format_size(r.original_bytes)
@@ -221,7 +221,7 @@ pub fn restore_with(ctx: &Ctx, id_or_tag: Option<String>, safety: bool) -> Resul
     Ok(msg)
 }
 
-fn pg_target(db: &ResolvedDb) -> Option<&PgTarget> {
+fn pg_target(db: &ResolvedDb) -> Option<&ServerTarget> {
     match &db.target {
         DbTarget::Postgres(pg) => Some(pg),
         _ => None,
@@ -229,7 +229,11 @@ fn pg_target(db: &ResolvedDb) -> Option<&PgTarget> {
 }
 
 /// Cap the number of automatic safety snapshots retained (design §4-T7).
-fn prune_auto_snapshots(meta: &mut Metadata, store: &Storage, pg: Option<&PgTarget>) -> Result<()> {
+fn prune_auto_snapshots(
+    meta: &mut Metadata,
+    store: &Storage,
+    pg: Option<&ServerTarget>,
+) -> Result<()> {
     let mut autos: Vec<SnapshotRecord> = meta
         .snapshots
         .iter()
@@ -254,7 +258,7 @@ fn remove_records(
     store: &Storage,
     survivors: &Metadata,
     victims: &[SnapshotRecord],
-    pg: Option<&PgTarget>,
+    pg: Option<&ServerTarget>,
 ) -> (usize, u64) {
     let survivor_files: HashSet<&str> = survivors
         .snapshots

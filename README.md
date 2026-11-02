@@ -38,9 +38,9 @@ npx db-snap list
 cargo install dbsnap
 ```
 
-Supported today: **SQLite** (delta snapshots) and **PostgreSQL** (server-side
-template clones + portable `pg_dump`). MySQL/MariaDB lands in **v0.3** — see
-[docs/DESIGN.md](docs/DESIGN.md).
+Supported: **SQLite** (delta snapshots), **PostgreSQL** (server-side template
+clones + portable `pg_dump`), and **MySQL/MariaDB** (consistent logical dumps
+with flavor detection) — design details in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## CLI
 
@@ -139,6 +139,15 @@ apply it across every project. The canonical copy lives in
   clone the current state as an automatic safety snapshot, drop + rename in
   one step, unfence. Restore from a dump re-creates the database with its
   original encoding/locale and replays `pg_restore`.
+- **MySQL/MariaDB save:** `mysqldump --single-transaction` (consistent for
+  InnoDB without locking writers) → zstd → blake3. Flavor detection picks
+  `mariadb-dump` vs `mysqldump` and retries with a fallback flag set for the
+  known cross-version quirks. Honest limit: dumps take seconds on big
+  databases — MySQL has no physical hot-copy API.
+- **MySQL/MariaDB restore:** verify the dump's hash, capture the schema's
+  charset/collation, keep a safety dump of the current state, drop +
+  recreate the database with those attributes, replay the dump (stopping on
+  the first error).
 - **Prune** is a real GC: chunks shared by surviving snapshots are never
   deleted; server-side clones of pruned snapshots are dropped too. Full
   design: [docs/DESIGN.md §3.5](docs/DESIGN.md).
@@ -150,11 +159,12 @@ apply it across every project. The canonical copy lives in
 ## Development
 
 ```bash
-cargo test        # 24 tests incl. live PostgreSQL (set DBSNAP_TEST_PG_URL)
+cargo test        # 25 tests incl. live PostgreSQL & MySQL (DBSNAP_TEST_PG_URL / DBSNAP_TEST_MYSQL_URL)
 cargo clippy --all-targets -- -D warnings
 cargo build --release
-scripts/e2e.sh      # SQLite: hot snapshot/rollback while a "dev server" writes
-scripts/e2e-pg.sh   # PostgreSQL: clone snapshot, destructive DDL, rollback
+scripts/e2e.sh       # SQLite: hot snapshot/rollback while a "dev server" writes
+scripts/e2e-pg.sh    # PostgreSQL: clone snapshot, destructive DDL, rollback
+scripts/e2e-mysql.sh # MySQL/MariaDB: consistent dump, destructive DDL, rollback
 ```
 
 ## Roadmap
@@ -162,7 +172,7 @@ scripts/e2e-pg.sh   # PostgreSQL: clone snapshot, destructive DDL, rollback
 - [x] **v0.1.0** — SQLite engine, CLI, MCP server, npm distribution
 - [x] **v0.1.5** — delta snapshots (content-addressed storage, 64 KB page-aligned chunks)
 - [x] **v0.2.0** — PostgreSQL (server-side template cloning + `pg_dump`, fencing & healing)
-- [ ] **v0.3.0** — MySQL/MariaDB (consistent logical dumps)
+- [x] **v0.3.0** — MySQL/MariaDB (consistent dumps, flavor detection, charset preservation)
 
 ## License
 

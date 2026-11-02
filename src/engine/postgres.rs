@@ -1,5 +1,5 @@
 use super::{DatabaseEngine, EngineInfo, RestoreOutcome, SaveMethod, SaveOpts, SaveOutcome};
-use crate::config::PgTarget;
+use crate::config::ServerTarget;
 use crate::storage::{compress, Location, SnapshotRecord, Storage};
 use crate::util;
 use anyhow::{bail, Context, Result};
@@ -14,11 +14,11 @@ pub const SNAP_PREFIX: &str = "__dbsnap_";
 
 /// A dbsnap-managed server-side clone of the target database.
 pub struct PostgresEngine {
-    pg: PgTarget,
+    pg: ServerTarget,
 }
 
 impl PostgresEngine {
-    pub fn new(pg: PgTarget) -> Self {
+    pub fn new(pg: ServerTarget) -> Self {
         Self { pg }
     }
 
@@ -516,7 +516,7 @@ impl DatabaseEngine for PostgresEngine {
 
 /// Drop a dbsnap-managed clone database (GC path for prune/retention).
 /// Refuses anything outside the `__dbsnap_` prefix (§2.2 rule 1).
-pub fn drop_managed_db(pg: &PgTarget, name: &str) -> Result<()> {
+pub fn drop_managed_db(pg: &ServerTarget, name: &str) -> Result<()> {
     if !name.starts_with(SNAP_PREFIX) {
         bail!("refusing to drop {name:?} — not a dbsnap-managed database");
     }

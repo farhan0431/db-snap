@@ -69,7 +69,7 @@ ALTER DATABASE dev_db WITH ALLOW_CONNECTIONS true;
 2. `ALLOW_CONNECTIONS true` dijalankan idempoten di **awal dan akhir** setiap operasi PG terhadap DB target — jika proses mati di tengah fencing, operasi berikutnya menyelamatkannya (healing). `dbsnap status` menampilkan DB yang masih ter-fencing.
 3. Kontrol-plane SQL (create/drop/rename/terminate, baca `pg_database`) memakai **`tokio-postgres`** (pure Rust, tanpa libpq). `pg_dump`/`pg_restore` hanya untuk mode dump — dispawn tanpa shell, argumen lewat argv.
 
-### 2.3 MySQL / MariaDB (v0.3)
+### 2.3 MySQL / MariaDB (sejak v0.3.0)
 
 **Konsep:** tidak ada jalur fisik → dump logis konsisten. Tool ini memanggil `mysqldump`/`mysql` (atau `mariadb-dump`/`mariadb`) yang di-spawn tanpa shell.
 

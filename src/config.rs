@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub enum Engine {
     Sqlite,
     Postgres,
+    Mysql,
 }
 
 impl std::fmt::Display for Engine {
@@ -14,14 +15,16 @@ impl std::fmt::Display for Engine {
         match self {
             Engine::Sqlite => write!(f, "sqlite"),
             Engine::Postgres => write!(f, "postgres"),
+            Engine::Mysql => write!(f, "mysql"),
         }
     }
 }
 
-/// Connection target for a local PostgreSQL database. Credentials never end
-/// up in fingerprints, logs, or metadata (design §4-T11).
+/// Connection target for a network-server database (PostgreSQL or
+/// MySQL/MariaDB). Credentials never end up in fingerprints, logs, or
+/// metadata (design §4-T11).
 #[derive(Debug, Clone)]
-pub struct PgTarget {
+pub struct ServerTarget {
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -29,7 +32,7 @@ pub struct PgTarget {
     pub database: String,
 }
 
-impl PgTarget {
+impl ServerTarget {
     /// Credential-free identity used in fingerprints and output.
     pub fn display(&self) -> String {
         format!("{}:{}/{}", self.host, self.port, self.database)
@@ -48,7 +51,8 @@ impl PgTarget {
 #[derive(Debug, Clone)]
 pub enum DbTarget {
     Sqlite(PathBuf),
-    Postgres(PgTarget),
+    Postgres(ServerTarget),
+    Mysql(ServerTarget),
 }
 
 /// The database this project is bound to, fully resolved.
@@ -63,7 +67,7 @@ impl ResolvedDb {
     pub fn display(&self) -> String {
         match &self.target {
             DbTarget::Sqlite(p) => p.display().to_string(),
-            DbTarget::Postgres(pg) => pg.display(),
+            DbTarget::Postgres(pg) | DbTarget::Mysql(pg) => pg.display(),
         }
     }
 
@@ -72,7 +76,7 @@ impl ResolvedDb {
             engine: self.engine.to_string(),
             target: match &self.target {
                 DbTarget::Sqlite(p) => p.display().to_string(),
-                DbTarget::Postgres(pg) => pg.display(),
+                DbTarget::Postgres(pg) | DbTarget::Mysql(pg) => pg.display(),
             },
         }
     }
@@ -145,12 +149,10 @@ pub fn parse_db_string(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
                 let rest = rest.strip_prefix("localhost").unwrap_or(rest);
                 return sqlite_from(PathBuf::from(percent_decode(rest)));
             }
-            "postgres" | "postgresql" => return postgres_from(raw, allow_remote),
-            "mysql" | "mariadb" => bail!(
-                "MySQL/MariaDB support arrives in v0.3.0 — dbsnap currently supports SQLite and PostgreSQL.\nSee docs/DESIGN.md for the multi-engine plan."
-            ),
+            "postgres" | "postgresql" => return server_from(raw, allow_remote, Engine::Postgres),
+            "mysql" | "mariadb" => return server_from(raw, allow_remote, Engine::Mysql),
             _ => bail!(
-                "unknown database scheme {scheme:?} in {raw:?} — expected a local path, sqlite://, file:// or postgres:// URL"
+                "unknown database scheme {scheme:?} in {raw:?} — expected a local path, sqlite://, file://, postgres:// or mysql:// URL"
             ),
         }
     }
@@ -158,11 +160,16 @@ pub fn parse_db_string(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
     sqlite_from(PathBuf::from(raw))
 }
 
-fn postgres_from(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
+fn server_from(raw: &str, allow_remote: bool, engine: Engine) -> Result<ResolvedDb> {
+    let (scheme, default_port, default_user) = match engine {
+        Engine::Postgres => ("postgres", 5432, "postgres"),
+        Engine::Mysql => ("mysql", 3306, "root"),
+        Engine::Sqlite => bail!("sqlite URLs are handled separately"),
+    };
     let url = url::Url::parse(raw).with_context(|| format!("parsing {raw:?} as a URL"))?;
     let host = url
         .host_str()
-        .context("postgres URL has no host")?
+        .with_context(|| format!("{scheme} URL has no host"))?
         .to_string();
     if !is_local_host(&host) && !allow_remote {
         bail!(
@@ -170,26 +177,31 @@ fn postgres_from(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
              (guard §4-T1). If you really mean it, pass --allow-remote."
         );
     }
-    let port = url.port().unwrap_or(5432);
+    let port = url.port().unwrap_or(default_port);
     let user = if url.username().is_empty() {
-        "postgres".to_string()
+        default_user.to_string()
     } else {
         url.username().to_string()
     };
     let password = url.password().map(percent_decode);
     let database = url.path().trim_start_matches('/').to_string();
     if database.is_empty() {
-        bail!("postgres URL has no database name: {raw:?}");
+        bail!("{scheme} URL has no database name: {raw:?}");
     }
+    let target = ServerTarget {
+        host,
+        port,
+        user,
+        password,
+        database,
+    };
     Ok(ResolvedDb {
-        engine: Engine::Postgres,
-        target: DbTarget::Postgres(PgTarget {
-            host,
-            port,
-            user,
-            password,
-            database,
-        }),
+        engine,
+        target: match engine {
+            Engine::Postgres => DbTarget::Postgres(target),
+            Engine::Mysql => DbTarget::Mysql(target),
+            Engine::Sqlite => unreachable!("handled above"),
+        },
     })
 }
 
@@ -351,8 +363,25 @@ mod tests {
     }
 
     #[test]
-    fn mysql_still_unsupported() {
-        assert!(parse_db_string("mysql://root@127.0.0.1/app", false).is_err());
+    fn parses_mysql_urls() {
+        let db = parse_db_string("mysql://app:pw@127.0.0.1:3307/app_dev", false).unwrap();
+        assert_eq!(db.engine, Engine::Mysql);
+        let DbTarget::Mysql(ref m) = db.target else {
+            panic!("expected mysql target");
+        };
+        assert_eq!(m.host, "127.0.0.1");
+        assert_eq!(m.port, 3307);
+        assert_eq!(m.user, "app");
+        assert_eq!(m.database, "app_dev");
+        assert!(!db.fingerprint().target.contains("pw"));
+
+        // mariadb:// juga dikenali; default port/user diisi bila absen
+        let db = parse_db_string("mariadb://localhost/app", false).unwrap();
+        let DbTarget::Mysql(ref m) = db.target else {
+            panic!("expected mysql target");
+        };
+        assert_eq!(m.port, 3306);
+        assert_eq!(m.user, "root");
     }
 
     #[test]
