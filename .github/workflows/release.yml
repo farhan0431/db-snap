@@ -1,0 +1,136 @@
+name: Release
+
+# Push a tag (v0.1.0) to: build 6 platform binaries, publish the matching
+# npm platform packages, publish the db-snap meta package, and attach
+# binaries to a GitHub Release.
+#
+# Required secret: NPM_TOKEN (automation token with publish rights to the
+# db-snap scope-less package and the db-snap-* platform packages).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            npm_name: db-snap-linux-x64-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            npm_name: db-snap-linux-x64-musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            npm_name: db-snap-linux-arm64
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            npm_name: db-snap-darwin-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            npm_name: db-snap-darwin-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            npm_name: db-snap-win32-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Strip binary (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: strip "target/${{ matrix.target }}/release/dbsnap" || true
+      - name: Stage npm platform package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="staging/${{ matrix.npm_name }}"
+          mkdir -p "$STAGE/bin"
+          EXT=""
+          [ "${{ runner.os }}" = "Windows" ] && EXT=".exe"
+          cp "target/${{ matrix.target }}/release/dbsnap$EXT" "$STAGE/bin/dbsnap$EXT"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('npm/packages/${{ matrix.npm_name }}/package.json', 'utf8'));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync('$STAGE/package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          cp LICENSE "$STAGE/LICENSE"
+          # artifact untuk GitHub Release
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -Command "Compress-Archive -Path 'target/${{ matrix.target }}/release/dbsnap.exe' -DestinationPath 'dbsnap-${{ matrix.target }}.zip' -Force"
+          else
+            zip -j "dbsnap-${{ matrix.target }}.zip" "target/${{ matrix.target }}/release/dbsnap"
+          fi
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          echo "ZIP=dbsnap-${{ matrix.target }}.zip" >> "$GITHUB_ENV"
+        env:
+          VERSION: ${{ github.ref_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.npm_name }}
+          path: staging/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zip-${{ matrix.target }}
+          path: dbsnap-*.zip
+      - name: Publish npm platform package
+        shell: bash
+        working-directory: ${{ env.STAGE }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # versi yang sudah ada di registry tidak boleh menggagalkan rilis ulang tag
+          npm publish --access public --non-interactive || \
+            echo "::warning::publish ${{ matrix.npm_name }} skipped (mungkin sudah ada)"
+
+  release-meta:
+    needs: build-platform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: zip-*
+          merge-multiple: true
+          path: zips/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zips/*.zip
+          generate_release_notes: true
+      - name: Publish meta package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('npm/package.json', 'utf8'));
+            pkg.version = process.env.VERSION;
+            for (const k of Object.keys(pkg.optionalDependencies)) pkg.optionalDependencies[k] = process.env.VERSION;
+            fs.writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          cd npm
+          npm publish --access public --non-interactive || echo "::warning::publish db-snap skipped (mungkin sudah ada)"
