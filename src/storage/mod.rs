@@ -17,15 +17,16 @@ const LOCK_WAIT_MS: u64 = 10_000;
 /// Project binding persisted in config.json (design §3.2).
 pub use crate::config::Fingerprint;
 
-/// Where a snapshot's bytes live. `file` = v0.1 single-file snapshot
-/// (still restorable); `manifest` = delta snapshot over the content-addressed
-/// chunk store (§3.5, default since v0.1.5); `pg_database` arrives with
-/// PostgreSQL (§2.2).
+/// Where a snapshot's bytes live. `file` = single-file snapshot (v0.1
+/// legacy or `pg_dump` output); `manifest` = delta snapshot over the
+/// content-addressed chunk store (§3.5); `pg_database` = server-side
+/// PostgreSQL clone (§2.2).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Location {
     File { path: String },
     Manifest { path: String },
+    PgDatabase { name: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,15 +55,16 @@ impl SnapshotRecord {
     pub fn file_path(&self) -> Option<&str> {
         match &self.location {
             Location::File { path } => Some(path),
-            Location::Manifest { .. } => None,
+            Location::Manifest { .. } | Location::PgDatabase { .. } => None,
         }
     }
 
     /// Relative path (inside .dbsnap/) of the record's primary artifact:
-    /// the .zst file for file snapshots, the manifest for delta snapshots.
-    pub fn artifact_rel(&self) -> &str {
+    /// the .zst/.dump file or the manifest. Server-side clones have none.
+    pub fn artifact_rel(&self) -> Option<&str> {
         match &self.location {
-            Location::File { path } | Location::Manifest { path } => path,
+            Location::File { path } | Location::Manifest { path } => Some(path),
+            Location::PgDatabase { .. } => None,
         }
     }
 
@@ -226,9 +228,16 @@ impl Storage {
         self.root.join("tmp")
     }
 
-    /// Absolute path of a record's primary artifact (.zst file or manifest).
+    /// Absolute path of a record's primary artifact (.zst/.dump file or
+    /// manifest). Server-side clones have no local file.
     pub fn snapshot_path(&self, record: &SnapshotRecord) -> Result<PathBuf> {
-        Ok(self.root.join(record.artifact_rel()))
+        match record.artifact_rel() {
+            Some(rel) => Ok(self.root.join(rel)),
+            None => bail!(
+                "snapshot {} lives inside the PostgreSQL server — no local file",
+                record.id
+            ),
+        }
     }
 
     /// Exclusive cross-process lock held for the duration of any mutating

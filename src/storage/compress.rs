@@ -58,6 +58,14 @@ pub fn compress_to(src: &Path, dst: &Path) -> Result<(u64, u64, String)> {
     Ok((original, compressed, hash))
 }
 
+/// blake3 of a file, streamed (constant memory).
+pub fn hash_file(path: &Path) -> Result<String> {
+    let reader = BufReader::with_capacity(1024 * 1024, File::open(path)?);
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut { reader }, &mut hasher)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 /// Decompress `src` into `dst`, hashing the compressed bytes on the way and
 /// comparing against `expected` BEFORE anything else consumes `dst`
 /// (verify-before-restore, design §4-T3). Returns the decompressed size.

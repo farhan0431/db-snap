@@ -1,3 +1,4 @@
+use crate::engine::SaveMethod;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -19,6 +20,9 @@ pub enum Command {
         /// Database path or URL (overrides DATABASE_URL), e.g. --db ./prisma/dev.db
         #[arg(long)]
         db: Option<String>,
+        /// Deliberately operate on a non-local host (safety guard override)
+        #[arg(long)]
+        allow_remote: bool,
     },
     /// Save a snapshot of the current database state
     Save {
@@ -27,6 +31,12 @@ pub enum Command {
         /// Database path or URL (overrides project binding)
         #[arg(long)]
         db: Option<String>,
+        /// Snapshot method: clone (default) or dump (portable pg_dump -Fc)
+        #[arg(long, value_enum, default_value_t = SaveMethod::Clone)]
+        method: SaveMethod,
+        /// Deliberately operate on a non-local host (safety guard override)
+        #[arg(long)]
+        allow_remote: bool,
         /// Operate even if the database differs from the project binding
         #[arg(long)]
         force: bool,
@@ -40,6 +50,9 @@ pub enum Command {
         /// Skip the automatic safety snapshot of the current state
         #[arg(long)]
         no_safety_snapshot: bool,
+        /// Deliberately operate on a non-local host (safety guard override)
+        #[arg(long)]
+        allow_remote: bool,
         /// Operate even if the database differs from the project binding
         #[arg(long)]
         force: bool,
@@ -50,6 +63,9 @@ pub enum Command {
         db: Option<String>,
         #[arg(long)]
         no_safety_snapshot: bool,
+        /// Deliberately operate on a non-local host (safety guard override)
+        #[arg(long)]
+        allow_remote: bool,
         #[arg(long)]
         force: bool,
     },

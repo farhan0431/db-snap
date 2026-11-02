@@ -1,15 +1,16 @@
 ---
 name: dbsnap
-description: Database time-machine for the local development database (instant physical snapshot / rollback). Use when about to run schema migrations, DDL (ALTER TABLE, DROP COLUMN), bulk data changes, reseed scripts, or ORM migrate commands on SQLite — or when the database is broken/corrupted and must be restored. Covers the dbsnap CLI and the dbsnap_* MCP tools.
+description: Database time-machine for the local development database (instant physical snapshot / rollback) for SQLite and PostgreSQL. Use when about to run schema migrations, DDL (ALTER TABLE, DROP COLUMN), bulk data changes, reseed scripts, or ORM migrate commands — or when the database is broken/corrupted and must be restored. Covers the dbsnap CLI and the dbsnap_* MCP tools.
 ---
 
 # dbsnap — database time-machine for this project
 
 dbsnap takes **physical snapshots** of the local development database and
-restores them bit-for-bit in milliseconds — like git commit / git checkout for
-data. Unlike query-level undo, it works after `DROP COLUMN`, botched
-migrations, and broken foreign keys, and it is safe to run **while the dev
-server is still running**.
+restores them bit-for-bit — like git commit / git checkout for data. Unlike
+query-level undo, it works after `DROP COLUMN`, botched migrations, and broken
+foreign keys, and it is safe to run **while the dev server is still running**.
+Engines: SQLite (delta snapshots, milliseconds) and PostgreSQL (server-side
+template clones, ~1 s with a brief connection blackout).
 
 ## Golden rules
 
@@ -39,19 +40,23 @@ project root; `--db <path>` overrides the bound database).
 ## How the database is resolved
 
 `--db` flag → `DATABASE_URL` from `.env` → auto-detect (`prisma/dev.db`,
-`dev.db`, `*.sqlite`, …). The `.dbsnap/config.json` fingerprint binds the
-project; operating on a **different** database is refused (deliberate override:
-`--force`, or re-run `dbsnap init`). The MCP server is **local-only** — it
-cannot target remote/production databases.
+`dev.db`, `*.sqlite`, …; PostgreSQL needs `DATABASE_URL` or `--db`, e.g.
+`postgres://user@localhost:5432/app_dev`). The `.dbsnap/config.json`
+fingerprint binds the project; operating on a **different** database is
+refused (deliberate override: `--force`, or re-run `dbsnap init`). The MCP
+server is **local-only** — it cannot target remote/production databases.
 
 ## Safety model (what you may rely on)
 
-- Restores are verified (blake3) before touching the live database; a corrupt
-  snapshot is refused, never applied.
+- Restores are verified (blake3 per chunk / per dump) before touching the
+  live database; a corrupt snapshot is refused, never applied.
 - Every restore first saves the current state as an `auto-before-restore-*`
   snapshot (kept: last 3). Quoted in the output as a one-command way back.
-- Snapshots live in `.dbsnap/` (git-ignored). Identical consecutive snapshots
-  are linked — snapshotting "just in case" costs nothing.
+- Snapshots live in `.dbsnap/` (git-ignored); PostgreSQL clones live
+  server-side as `__dbsnap_*` databases. Identical consecutive snapshots are
+  linked — snapshotting "just in case" costs nothing.
+- PostgreSQL note: a clone save/restore blocks NEW connections to the target
+  database for about a second; the dev server reconnects on its own.
 
 ## Troubleshooting
 

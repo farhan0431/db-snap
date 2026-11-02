@@ -53,7 +53,7 @@ fn tools_call(ctx: &Ctx, params: Option<&Value>) -> Result<Value, (i64, String)>
             let Some(tag) = args["tag"].as_str().map(str::to_string) else {
                 return Ok(error_result("missing required argument: tag (string)"));
             };
-            ops::save_with(ctx, Some(tag))
+            ops::save_with(ctx, Some(tag), crate::engine::SaveMethod::Clone)
         }
         "dbsnap_restore_snapshot" => {
             let id = args["tag_or_id"].as_str().map(str::to_string);

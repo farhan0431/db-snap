@@ -11,13 +11,13 @@ use std::io::{BufRead, BufReader, Write};
 /// go to stderr (design §6).
 pub fn run(explicit_db: Option<&str>) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let ctx = ops::context_at(&root, explicit_db, false)?;
+    let ctx = ops::context_at(&root, explicit_db, false, false)?;
 
     eprintln!(
         "dbsnap mcp {} — serving {} ({})",
         env!("CARGO_PKG_VERSION"),
         ctx.db.engine,
-        ctx.db.path.display()
+        ctx.db.display()
     );
 
     let stdin = std::io::stdin();

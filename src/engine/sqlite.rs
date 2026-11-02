@@ -1,4 +1,4 @@
-use super::{DatabaseEngine, EngineInfo, SaveOutcome};
+use super::{DatabaseEngine, EngineInfo, RestoreOutcome, SaveMethod, SaveOpts, SaveOutcome};
 use crate::storage::{cas, compress, Location, SnapshotRecord, SourceState, Storage};
 use crate::util;
 use anyhow::{bail, Context, Result};
@@ -49,6 +49,50 @@ impl SqliteEngine {
             mtime_ms,
         })
     }
+
+    /// Verify (§4-T3) and materialize the snapshot into a staging file
+    /// without touching the live database.
+    fn stage(&self, store: &Storage, record: &SnapshotRecord) -> Result<PathBuf> {
+        match &record.location {
+            Location::File { path } => {
+                let src = store.root.join(path);
+                if !src.exists() {
+                    bail!(
+                        "snapshot file {} is missing on disk — the snapshot catalog may be out of sync",
+                        src.display()
+                    );
+                }
+                let staged = store.tmp_dir().join(format!("restore-{}.db", record.id));
+                compress::decompress_verified(&src, &staged, &record.blake3)?;
+                Ok(staged)
+            }
+            Location::Manifest { path } => {
+                // Reassembles from the chunk store, verifying every chunk
+                // (per-chunk integrity, design §4-T3).
+                let (staged, _) = cas::stage_from_manifest(store, path, &record.id)?;
+                Ok(staged)
+            }
+            Location::PgDatabase { .. } => bail!(
+                "snapshot {} is a PostgreSQL server-side clone — restore it with the PostgreSQL engine bound to that server",
+                record.id
+            ),
+        }
+    }
+
+    /// Backup-API the staged pages into the live database, then flush the
+    /// WAL so the running dev server reads the new state immediately.
+    fn apply(&self, staged: &Path) -> Result<()> {
+        {
+            let src = Connection::open(staged)
+                .with_context(|| format!("opening staged snapshot {}", staged.display()))?;
+            let mut dst = self.open_live()?;
+            let backup = Backup::new(&src, &mut dst)?;
+            backup.run_to_completion(BACKUP_PAGES_PER_STEP, Duration::from_millis(0), None)?;
+        }
+        let live = self.open_live()?;
+        let _ = live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        Ok(())
+    }
 }
 
 impl DatabaseEngine for SqliteEngine {
@@ -72,9 +116,16 @@ impl DatabaseEngine for SqliteEngine {
         &self,
         store: &Storage,
         tag: &str,
+        opts: &SaveOpts,
         previous: Option<&SnapshotRecord>,
         taken_ids: &HashSet<String>,
     ) -> Result<SaveOutcome> {
+        if opts.method == SaveMethod::Dump {
+            bail!(
+                "--method dump is PostgreSQL-only — SQLite snapshots are already physical and delta-compressed"
+            );
+        }
+
         // Fast path: the source is provably untouched since the previous
         // snapshot (data_version + size + mtime all equal) — link it.
         let current_state = self.source_state();
@@ -162,41 +213,56 @@ impl DatabaseEngine for SqliteEngine {
         }
     }
 
-    fn stage_restore(&self, store: &Storage, record: &SnapshotRecord) -> Result<PathBuf> {
-        match &record.location {
-            Location::File { path } => {
-                let src = store.root.join(path);
-                if !src.exists() {
-                    bail!(
-                        "snapshot file {} is missing on disk — the snapshot catalog may be out of sync",
-                        src.display()
-                    );
-                }
-                let staged = store.tmp_dir().join(format!("restore-{}.db", record.id));
-                compress::decompress_verified(&src, &staged, &record.blake3)?;
-                Ok(staged)
-            }
-            Location::Manifest { path } => {
-                // Reassembles from the chunk store, verifying every chunk
-                // (per-chunk integrity, design §4-T3).
-                let (staged, _) = cas::stage_from_manifest(store, path, &record.id)?;
-                Ok(staged)
-            }
-        }
-    }
+    fn restore(
+        &self,
+        store: &Storage,
+        record: &SnapshotRecord,
+        safety_tag: Option<&str>,
+    ) -> Result<RestoreOutcome> {
+        // Verify integrity BEFORE anything touches the live database (§4-T3).
+        let staged = self.stage(store, record)?;
 
-    fn apply_restore(&self, staged: &Path) -> Result<()> {
-        {
-            let src = Connection::open(staged)
-                .with_context(|| format!("opening staged snapshot {}", staged.display()))?;
-            let mut dst = self.open_live()?;
-            let backup = Backup::new(&src, &mut dst)?;
-            backup.run_to_completion(BACKUP_PAGES_PER_STEP, Duration::from_millis(0), None)?;
+        // Safety snapshot of the current state first (§4-T7) — persisted to
+        // metadata immediately so a crash mid-restore still leaves a way back.
+        let mut safety = None;
+        if let Some(tag) = safety_tag {
+            let meta = store.load_metadata()?;
+            let taken = meta.ids();
+            match self.save(
+                store,
+                tag,
+                &SaveOpts {
+                    method: SaveMethod::Clone,
+                },
+                meta.latest().as_ref(),
+                &taken,
+            ) {
+                Ok(outcome) => {
+                    let mut meta = store.load_metadata()?;
+                    meta.snapshots.push(outcome.record.clone());
+                    store.write_metadata(&meta)?;
+                    safety = Some(outcome.record);
+                }
+                Err(e) => {
+                    eprintln!("warning: pre-restore safety snapshot failed: {e:#}");
+                }
+            }
         }
-        // Flush the WAL so the running dev server reads the restored pages
-        // immediately (design §2.1).
-        let live = self.open_live()?;
-        let _ = live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-        Ok(())
+
+        if let Err(e) = self.apply(&staged) {
+            std::fs::remove_file(&staged).ok();
+            let hint = safety
+                .as_ref()
+                .map(|r| {
+                    format!(
+                        "\nthe pre-restore state was saved as snapshot {} — recover with: dbsnap restore {}",
+                        r.id, r.id
+                    )
+                })
+                .unwrap_or_default();
+            bail!("restore failed: {e:#}{hint}");
+        }
+        std::fs::remove_file(&staged).ok();
+        Ok(RestoreOutcome { safety })
     }
 }

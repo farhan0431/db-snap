@@ -38,8 +38,9 @@ npx db-snap list
 cargo install dbsnap
 ```
 
-Supported today: **SQLite** (local files). PostgreSQL lands in **v0.2**,
-MySQL/MariaDB in **v0.3** — see [docs/DESIGN.md](docs/DESIGN.md).
+Supported today: **SQLite** (delta snapshots) and **PostgreSQL** (server-side
+template clones + portable `pg_dump`). MySQL/MariaDB lands in **v0.3** — see
+[docs/DESIGN.md](docs/DESIGN.md).
 
 ## CLI
 
@@ -121,34 +122,46 @@ apply it across every project. The canonical copy lives in
 
 ## How it works
 
-- **Save:** SQLite Online Backup API → page-consistent copy → the file is
-  chunked into **64 KB page-aligned blocks** (blake3-hashed) → only chunks
-  not already in the store are written (zstd). A snapshot is a small manifest
-  of chunk hashes, so a fresh snapshot costs roughly one pass over the file
-  and an incremental one costs kilobytes–megabytes — *not* the whole database.
-  Unchanged databases are *linked* with zero I/O (`PRAGMA data_version`
-  short-circuit).
-- **Restore:** reassemble from the chunk store, verifying every chunk's hash
-  on the way → Backup API into the live database (works even on Windows while
-  the file is open) → `PRAGMA wal_checkpoint(TRUNCATE)` so your dev server
-  sees the new state immediately.
+- **SQLite save:** Online Backup API → page-consistent copy → chunked into
+  **64 KB page-aligned blocks** (blake3-hashed) → only chunks not already in
+  the store are written (zstd). A snapshot is a small manifest of chunk
+  hashes, so incremental snapshots cost kilobytes–megabytes, not the whole
+  database. Unchanged databases are *linked* with zero I/O.
+- **SQLite restore:** reassemble from the chunk store, verifying every
+  chunk's hash → Backup API into the live database (works even on Windows
+  while the file is open) → `PRAGMA wal_checkpoint(TRUNCATE)` so the dev
+  server sees the new state immediately.
+- **PostgreSQL save (clone, default):** `CREATE DATABASE __dbsnap_<id>
+  TEMPLATE dev` — a block-level copy inside the server, done in ~1 s with a
+  brief connection blackout (your dev server reconnects automatically).
+  **`--method dump`:** `pg_dump -Fc` — slower but portable across machines.
+- **PostgreSQL restore (clone):** fence the target (block new connections),
+  clone the current state as an automatic safety snapshot, drop + rename in
+  one step, unfence. Restore from a dump re-creates the database with its
+  original encoding/locale and replays `pg_restore`.
 - **Prune** is a real GC: chunks shared by surviving snapshots are never
-  deleted. Full design: [docs/DESIGN.md §3.5](docs/DESIGN.md).
+  deleted; server-side clones of pruned snapshots are dropped too. Full
+  design: [docs/DESIGN.md §3.5](docs/DESIGN.md).
+- **Safety (PostgreSQL):** dbsnap only ever creates/drops/renames databases
+  under the `__dbsnap_` prefix, always re-enables connections (even after a
+  crash mid-operation), and hard-refuses remote hosts unless you pass
+  `--allow-remote`.
 
 ## Development
 
 ```bash
-cargo test        # 17 tests: engine cycle, corruption, dedup, prune, MCP stdio
+cargo test        # 24 tests incl. live PostgreSQL (set DBSNAP_TEST_PG_URL)
 cargo clippy --all-targets -- -D warnings
 cargo build --release
-scripts/e2e.sh    # hot snapshot/rollback while a live "dev server" writes to the DB
+scripts/e2e.sh      # SQLite: hot snapshot/rollback while a "dev server" writes
+scripts/e2e-pg.sh   # PostgreSQL: clone snapshot, destructive DDL, rollback
 ```
 
 ## Roadmap
 
 - [x] **v0.1.0** — SQLite engine, CLI, MCP server, npm distribution
 - [x] **v0.1.5** — delta snapshots (content-addressed storage, 64 KB page-aligned chunks)
-- [ ] **v0.2.0** — PostgreSQL (server-side template cloning + `pg_dump`)
+- [x] **v0.2.0** — PostgreSQL (server-side template cloning + `pg_dump`, fencing & healing)
 - [ ] **v0.3.0** — MySQL/MariaDB (consistent logical dumps)
 
 ## License

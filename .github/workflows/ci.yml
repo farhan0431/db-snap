@@ -24,3 +24,28 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test
+
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dbsnap
+          POSTGRES_PASSWORD: dbsnap
+          POSTGRES_DB: dbsnap_admin
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U dbsnap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests (PostgreSQL engine)
+        run: cargo test
+        env:
+          DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@localhost:5433/dbsnap_admin

@@ -21,19 +21,41 @@ fn run(command: Command) -> i32 {
     };
 
     let result = match command {
-        Command::Init { db } => ops::init_at(&root, db.as_deref()),
-        Command::Save { tag, db, force } => ops::save_at(&root, db.as_deref(), tag, force),
+        Command::Init { db, allow_remote } => ops::init_at(&root, db.as_deref(), allow_remote),
+        Command::Save {
+            tag,
+            db,
+            method,
+            allow_remote,
+            force,
+        } => ops::save_at(&root, db.as_deref(), tag, force, allow_remote, method),
         Command::Restore {
             tag_or_id,
             db,
             no_safety_snapshot,
+            allow_remote,
             force,
-        } => ops::restore_at(&root, db.as_deref(), tag_or_id, !no_safety_snapshot, force),
+        } => ops::restore_at(
+            &root,
+            db.as_deref(),
+            tag_or_id,
+            !no_safety_snapshot,
+            force,
+            allow_remote,
+        ),
         Command::Rollback {
             db,
             no_safety_snapshot,
+            allow_remote,
             force,
-        } => ops::restore_at(&root, db.as_deref(), None, !no_safety_snapshot, force),
+        } => ops::restore_at(
+            &root,
+            db.as_deref(),
+            None,
+            !no_safety_snapshot,
+            force,
+            allow_remote,
+        ),
         Command::List { db } => ops::list_at(&root, db.as_deref()),
         Command::Status { db } => ops::status_at(&root, db.as_deref()),
         Command::Prune { keep, all, db } => {

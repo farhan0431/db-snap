@@ -1,4 +1,4 @@
-use crate::config::{self, ResolvedDb};
+use crate::config::{self, DbTarget, PgTarget, ResolvedDb};
 use crate::engine;
 use crate::storage::{Metadata, SnapshotRecord, Storage};
 use crate::util;
@@ -24,9 +24,15 @@ const AUTO_SAFETY_KEEP: usize = 3;
 
 /// Find or create `.dbsnap/` for `root`, resolving the database (explicit
 /// flag → DATABASE_URL/.env → auto-detect). `force` rebinds when the target
-/// differs from the stored fingerprint (design §4-T2).
-pub fn context_at(root: &Path, explicit: Option<&str>, force: bool) -> Result<Ctx> {
-    let db = config::resolve(explicit)?;
+/// differs from the stored fingerprint (§4-T2); `allow_remote` lifts the
+/// local-host guard for this command (§4-T1) — MCP always passes false.
+pub fn context_at(
+    root: &Path,
+    explicit: Option<&str>,
+    force: bool,
+    allow_remote: bool,
+) -> Result<Ctx> {
+    let db = config::resolve(explicit, allow_remote)?;
     let fingerprint = db.fingerprint();
     if let Some(store) = Storage::find(root) {
         let bound = store.load_config()?;
@@ -50,8 +56,8 @@ pub fn context_at(root: &Path, explicit: Option<&str>, force: bool) -> Result<Ct
     }
 }
 
-pub fn init_at(root: &Path, explicit: Option<&str>) -> Result<String> {
-    let db = config::resolve(explicit)?;
+pub fn init_at(root: &Path, explicit: Option<&str>, allow_remote: bool) -> Result<String> {
+    let db = config::resolve(explicit, allow_remote)?;
     let fingerprint = db.fingerprint();
     let existed = Storage::find(root).is_some();
     let store = Storage::create(root, &fingerprint)?;
@@ -64,7 +70,7 @@ pub fn init_at(root: &Path, explicit: Option<&str>) -> Result<String> {
     msg.push_str(&format!(
         "\n  database : {} ({})\n  storage  : {}",
         db.engine,
-        db.path.display(),
+        db.display(),
         store.root.display()
     ));
 
@@ -79,7 +85,7 @@ pub fn init_at(root: &Path, explicit: Option<&str>) -> Result<String> {
         }
         Err(_) => {
             msg.push_str(
-                "\n  warning  : database file does not exist yet — it will be created on first save",
+                "\n  warning  : database unreachable — check the server / file path before saving",
             );
         }
     }
@@ -111,12 +117,14 @@ pub fn save_at(
     explicit: Option<&str>,
     tag: Option<String>,
     force: bool,
+    allow_remote: bool,
+    method: engine::SaveMethod,
 ) -> Result<String> {
-    let ctx = context_at(root, explicit, force)?;
-    save_with(&ctx, tag)
+    let ctx = context_at(root, explicit, force, allow_remote)?;
+    save_with(&ctx, tag, method)
 }
 
-pub fn save_with(ctx: &Ctx, tag: Option<String>) -> Result<String> {
+pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> Result<String> {
     let tag = match tag {
         Some(t) => {
             util::validate_tag(&t)?;
@@ -128,18 +136,34 @@ pub fn save_with(ctx: &Ctx, tag: Option<String>) -> Result<String> {
     let taken = meta.ids();
     let previous = meta.latest();
     let engine = engine::make(&ctx.db)?;
-    let outcome = engine.save(&ctx.store, &tag, previous.as_ref(), &taken)?;
+    let outcome = engine.save(
+        &ctx.store,
+        &tag,
+        &engine::SaveOpts { method },
+        previous.as_ref(),
+        &taken,
+    )?;
     meta.snapshots.push(outcome.record.clone());
     ctx.store.write_metadata(&meta)?;
 
     let r = &outcome.record;
-    let mut msg = format!(
-        "saved snapshot {} \"{}\" — {} compressed ({} original)",
-        r.id,
-        r.tag,
-        util::format_size(r.size_bytes),
-        util::format_size(r.original_bytes)
-    );
+    let detail = match r.method.as_str() {
+        "pg-clone" => format!(
+            "server-side clone, {} in database",
+            util::format_size(r.original_bytes)
+        ),
+        "pg-dump" => format!(
+            "{} dump ({} original)",
+            util::format_size(r.size_bytes),
+            util::format_size(r.original_bytes)
+        ),
+        _ => format!(
+            "{} compressed ({} original)",
+            util::format_size(r.size_bytes),
+            util::format_size(r.original_bytes)
+        ),
+    };
+    let mut msg = format!("saved snapshot {} \"{}\" — {detail}", r.id, r.tag);
     if outcome.linked {
         msg.push_str("\nidentical to the previous snapshot — linked, no extra storage used");
     }
@@ -152,66 +176,60 @@ pub fn restore_at(
     id_or_tag: Option<String>,
     safety: bool,
     force: bool,
+    allow_remote: bool,
 ) -> Result<String> {
-    let ctx = context_at(root, explicit, force)?;
+    let ctx = context_at(root, explicit, force, allow_remote)?;
     restore_with(&ctx, id_or_tag, safety)
 }
 
 pub fn restore_with(ctx: &Ctx, id_or_tag: Option<String>, safety: bool) -> Result<String> {
-    let mut meta = ctx.store.load_metadata()?;
+    let meta = ctx.store.load_metadata()?;
     let record = meta.find(id_or_tag.as_deref())?;
+    if record.engine != ctx.db.engine.to_string() {
+        bail!(
+            "snapshot {} is a {} snapshot but the bound database is {} — engine mismatch",
+            record.id,
+            record.engine,
+            ctx.db.engine
+        );
+    }
     let engine = engine::make(&ctx.db)?;
 
-    // Verify integrity BEFORE anything touches the live database (§4-T3).
-    let staged = engine.stage_restore(&ctx.store, &record)?;
+    // The engine verifies integrity first (§4-T3) and creates + persists the
+    // safety snapshot (§4-T7) before any destructive step.
+    let outcome = engine.restore(
+        &ctx.store,
+        &record,
+        safety.then(util::safety_tag).as_deref(),
+    )?;
 
-    // Safety snapshot of the current state first (§4-T7).
-    let mut safety_id: Option<String> = None;
-    if safety {
-        let taken = meta.ids();
-        match engine.save(
-            &ctx.store,
-            &util::safety_tag(),
-            meta.latest().as_ref(),
-            &taken,
-        ) {
-            Ok(outcome) => {
-                safety_id = Some(outcome.record.id.clone());
-                meta.snapshots.push(outcome.record);
-            }
-            Err(e) => {
-                eprintln!("warning: pre-restore safety snapshot failed: {e:#}");
-            }
-        }
-    }
-
-    if let Err(e) = engine.apply_restore(&staged) {
-        fs::remove_file(&staged).ok();
-        let hint = safety_id
-            .as_ref()
-            .map(|id| format!("\nthe pre-restore state was saved as snapshot {id} — recover with: dbsnap restore {id}"))
-            .unwrap_or_default();
-        bail!("restore failed: {e:#}{hint}");
-    }
-    fs::remove_file(&staged).ok();
-
-    prune_auto_snapshots(&mut meta, &ctx.store)?;
+    // Retention for auto safety snapshots (§4-T7).
+    let mut meta = ctx.store.load_metadata()?;
+    prune_auto_snapshots(&mut meta, &ctx.store, pg_target(&ctx.db))?;
     ctx.store.write_metadata(&meta)?;
 
     let mut msg = format!(
         "restored database to snapshot {} \"{}\"",
         record.id, record.tag
     );
-    if let Some(id) = safety_id {
+    if let Some(r) = &outcome.safety {
         msg.push_str(&format!(
-            "\nprevious state kept as safety snapshot {id} (rollback: dbsnap restore {id})"
+            "\nprevious state kept as safety snapshot {} (rollback: dbsnap restore {})",
+            r.id, r.id
         ));
     }
     Ok(msg)
 }
 
+fn pg_target(db: &ResolvedDb) -> Option<&PgTarget> {
+    match &db.target {
+        DbTarget::Postgres(pg) => Some(pg),
+        _ => None,
+    }
+}
+
 /// Cap the number of automatic safety snapshots retained (design §4-T7).
-fn prune_auto_snapshots(meta: &mut Metadata, store: &Storage) -> Result<()> {
+fn prune_auto_snapshots(meta: &mut Metadata, store: &Storage, pg: Option<&PgTarget>) -> Result<()> {
     let mut autos: Vec<SnapshotRecord> = meta
         .snapshots
         .iter()
@@ -225,7 +243,7 @@ fn prune_auto_snapshots(meta: &mut Metadata, store: &Storage) -> Result<()> {
     let victims: Vec<SnapshotRecord> = autos.split_off(AUTO_SAFETY_KEEP);
     meta.snapshots
         .retain(|s| !victims.iter().any(|v| v.id == s.id));
-    remove_records(store, meta, &victims);
+    remove_records(store, meta, &victims, pg);
     Ok(())
 }
 
@@ -236,6 +254,7 @@ fn remove_records(
     store: &Storage,
     survivors: &Metadata,
     victims: &[SnapshotRecord],
+    pg: Option<&PgTarget>,
 ) -> (usize, u64) {
     let survivor_files: HashSet<&str> = survivors
         .snapshots
@@ -244,12 +263,19 @@ fn remove_records(
         .collect();
     let mut survivor_manifests: HashSet<&str> = HashSet::new();
     let mut survivor_chunks: HashSet<String> = HashSet::new();
+    let mut survivor_pgdbs: HashSet<&str> = HashSet::new();
     for s in &survivors.snapshots {
-        if let crate::storage::Location::Manifest { path } = &s.location {
-            survivor_manifests.insert(path.as_str());
-            if let Ok(m) = store.read_manifest_file(path) {
-                survivor_chunks.extend(m.hexes());
+        match &s.location {
+            crate::storage::Location::Manifest { path } => {
+                survivor_manifests.insert(path.as_str());
+                if let Ok(m) = store.read_manifest_file(path) {
+                    survivor_chunks.extend(m.hexes());
+                }
             }
+            crate::storage::Location::PgDatabase { name } => {
+                survivor_pgdbs.insert(name.as_str());
+            }
+            crate::storage::Location::File { .. } => {}
         }
     }
 
@@ -283,6 +309,18 @@ fn remove_records(
                     fs::remove_file(store.root.join(path)).ok();
                 }
             }
+            crate::storage::Location::PgDatabase { name } => {
+                // Server-side clone: drop the managed database (§2.2 rule 1 —
+                // only names under the __dbsnap_ prefix are ever dropped).
+                // Best-effort: an unreachable server must not fail the prune.
+                if !survivor_pgdbs.contains(name.as_str()) {
+                    if let Some(pg) = pg {
+                        if let Err(e) = crate::engine::postgres::drop_managed_db(pg, name) {
+                            eprintln!("warning: could not drop {name}: {e:#}");
+                        }
+                    }
+                }
+            }
         }
         removed += 1;
     }
@@ -290,7 +328,7 @@ fn remove_records(
 }
 
 pub fn list_at(root: &Path, explicit: Option<&str>) -> Result<String> {
-    let ctx = context_at(root, explicit, false)?;
+    let ctx = context_at(root, explicit, false, false)?;
     list_with(&ctx)
 }
 
@@ -350,7 +388,7 @@ pub fn list_with(ctx: &Ctx) -> Result<String> {
 }
 
 pub fn prune_at(root: &Path, explicit: Option<&str>, keep: usize) -> Result<String> {
-    let ctx = context_at(root, explicit, false)?;
+    let ctx = context_at(root, explicit, false, false)?;
     prune_with(&ctx, keep)
 }
 
@@ -363,7 +401,7 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
     let mut removed = 0usize;
     if keep < meta.snapshots.len() {
         let victims: Vec<SnapshotRecord> = meta.snapshots.split_off(keep);
-        let (n, f) = remove_records(&ctx.store, &meta, &victims);
+        let (n, f) = remove_records(&ctx.store, &meta, &victims, pg_target(&ctx.db));
         removed = n;
         freed = f;
     }
@@ -385,7 +423,7 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
 }
 
 pub fn status_at(root: &Path, explicit: Option<&str>) -> Result<String> {
-    let ctx = context_at(root, explicit, false)?;
+    let ctx = context_at(root, explicit, false, false)?;
     status_with(&ctx)
 }
 
@@ -425,7 +463,7 @@ pub fn status_with(ctx: &Ctx) -> Result<String> {
     Ok(format!(
         "database  : {} ({})\nengine    : {}{}\nsnapshots : {} ({} unique files, {} on disk)\ndelta     : {manifests} manifests, {objects} chunks ({})\ntmp       : {tmp_leftovers} leftover files{free}",
         ctx.db.engine,
-        ctx.db.path.display(),
+        ctx.db.display(),
         info.detail,
         size,
         meta.snapshots.len(),

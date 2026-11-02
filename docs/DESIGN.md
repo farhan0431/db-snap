@@ -34,7 +34,7 @@ Ketiga engine punya karakteristik penyimpanan yang berbeda fundamental. Desain y
 - Penyimpanan hasil save: v0.1 full-copy ke `snapshots/<id>.zst`; sejak v0.2 manifest delta CAS (§3.5) supaya latensi & disk tidak tumbuh linear dengan ukuran DB.
 - Alasan Backup API (bukan salin file biasa): **"Online" di sini bukan internet/cloud** — istilah resmi SQLite untuk backup saat DB sedang dipakai; fungsinya ada di dalam library SQLite itu sendiri (di-bundle via `rusqlite`, 100% lokal & offline). Salin file biasa gagal tiga arah: (1) mode WAL — data terbaru ada di file `-wal`, bukan `dev.db`; (2) torn copy saat server menulis di tengah proses; (3) Windows tidak bisa menimpa file terbuka, dan trik rename di Linux membuat server yang hidup terus membaca inode lama (restore "sukses" tapi aplikasi tidak melihat datanya). Backup API satu-satunya jalur save & restore panas yang benar di semua OS — `VACUUM INTO` (alternatif lokal) hanya menyelesaikan sisi save dan lebih lambat.
 
-### 2.2 PostgreSQL (v0.2)
+### 2.2 PostgreSQL (sejak v0.2.0)
 
 **Konsep:** snapshot disimpan sebagai database tersembunyi *di dalam server Postgres yang sama* — salinan blok level storage, bukan dump.
 

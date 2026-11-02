@@ -6,28 +6,74 @@ use std::path::PathBuf;
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Sqlite,
+    Postgres,
 }
 
 impl std::fmt::Display for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Engine::Sqlite => write!(f, "sqlite"),
+            Engine::Postgres => write!(f, "postgres"),
         }
     }
 }
 
-/// The database this project is bound to, fully resolved to an absolute path.
+/// Connection target for a local PostgreSQL database. Credentials never end
+/// up in fingerprints, logs, or metadata (design §4-T11).
+#[derive(Debug, Clone)]
+pub struct PgTarget {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: Option<String>,
+    pub database: String,
+}
+
+impl PgTarget {
+    /// Credential-free identity used in fingerprints and output.
+    pub fn display(&self) -> String {
+        format!("{}:{}/{}", self.host, self.port, self.database)
+    }
+
+    /// libpq-style connstring for spawned clients — no password field; the
+    /// password travels via PGPASSWORD env instead (design §4-T10).
+    pub fn connstring(&self) -> String {
+        format!(
+            "host={} port={} user={} dbname={}",
+            self.host, self.port, self.user, self.database
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum DbTarget {
+    Sqlite(PathBuf),
+    Postgres(PgTarget),
+}
+
+/// The database this project is bound to, fully resolved.
 #[derive(Debug, Clone)]
 pub struct ResolvedDb {
     pub engine: Engine,
-    pub path: PathBuf,
+    pub target: DbTarget,
 }
 
 impl ResolvedDb {
+    /// Credential-free, human-readable target description.
+    pub fn display(&self) -> String {
+        match &self.target {
+            DbTarget::Sqlite(p) => p.display().to_string(),
+            DbTarget::Postgres(pg) => pg.display(),
+        }
+    }
+
     pub fn fingerprint(&self) -> Fingerprint {
         Fingerprint {
             engine: self.engine.to_string(),
-            target: self.path.display().to_string(),
+            target: match &self.target {
+                DbTarget::Sqlite(p) => p.display().to_string(),
+                DbTarget::Postgres(pg) => pg.display(),
+            },
         }
     }
 }
@@ -42,15 +88,17 @@ pub struct Fingerprint {
 
 /// Resolve which database to operate on: explicit --db flag → DATABASE_URL
 /// (from environment or .env) → auto-detection of common local paths.
-pub fn resolve(explicit: Option<&str>) -> Result<ResolvedDb> {
+/// `allow_remote` is the explicit human-only override (design §4-T1); MCP
+/// mode always passes false.
+pub fn resolve(explicit: Option<&str>, allow_remote: bool) -> Result<ResolvedDb> {
     if let Some(v) = explicit {
-        return parse_db_string(v);
+        return parse_db_string(v, allow_remote);
     }
     dotenvy::dotenv().ok();
     if let Ok(v) = std::env::var("DATABASE_URL") {
         let v = v.trim();
         if !v.is_empty() {
-            return parse_db_string(v);
+            return parse_db_string(v, allow_remote);
         }
     }
     auto_detect()
@@ -74,17 +122,17 @@ fn sqlite_from(path: PathBuf) -> Result<ResolvedDb> {
     );
     Ok(ResolvedDb {
         engine: Engine::Sqlite,
-        path,
+        target: DbTarget::Sqlite(path),
     })
 }
 
-pub fn parse_db_string(raw: &str) -> Result<ResolvedDb> {
+pub fn parse_db_string(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
     let raw = raw.trim();
     if raw.is_empty() {
         bail!("database value is empty");
     }
 
-    if let Some((scheme, rest)) = raw.split_once(':') {
+    if let Some((scheme, _rest)) = raw.split_once(':') {
         // "C:\...", "C:/...", "C:file" — Windows drive paths, never schemes
         // (real URL schemes are at least 2 characters).
         if scheme.len() == 1 {
@@ -92,23 +140,57 @@ pub fn parse_db_string(raw: &str) -> Result<ResolvedDb> {
         }
         match scheme {
             "sqlite" | "file" => {
+                let rest = raw.split_once(':').unwrap().1;
                 let rest = rest.trim_start_matches("//");
                 let rest = rest.strip_prefix("localhost").unwrap_or(rest);
                 return sqlite_from(PathBuf::from(percent_decode(rest)));
             }
-            "postgres" | "postgresql" => bail!(
-                "PostgreSQL support arrives in v0.2.0 — dbsnap currently supports local SQLite databases.\nSee docs/DESIGN.md for the multi-engine plan."
-            ),
+            "postgres" | "postgresql" => return postgres_from(raw, allow_remote),
             "mysql" | "mariadb" => bail!(
-                "MySQL/MariaDB support arrives in v0.3.0 — dbsnap currently supports local SQLite databases.\nSee docs/DESIGN.md for the multi-engine plan."
+                "MySQL/MariaDB support arrives in v0.3.0 — dbsnap currently supports SQLite and PostgreSQL.\nSee docs/DESIGN.md for the multi-engine plan."
             ),
             _ => bail!(
-                "unknown database scheme {scheme:?} in {raw:?} — expected a local path, sqlite:// or file:// URL"
+                "unknown database scheme {scheme:?} in {raw:?} — expected a local path, sqlite://, file:// or postgres:// URL"
             ),
         }
     }
 
     sqlite_from(PathBuf::from(raw))
+}
+
+fn postgres_from(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
+    let url = url::Url::parse(raw).with_context(|| format!("parsing {raw:?} as a URL"))?;
+    let host = url
+        .host_str()
+        .context("postgres URL has no host")?
+        .to_string();
+    if !is_local_host(&host) && !allow_remote {
+        bail!(
+            "refusing to touch non-local host {host:?} — dbsnap protects LOCAL databases only\n\
+             (guard §4-T1). If you really mean it, pass --allow-remote."
+        );
+    }
+    let port = url.port().unwrap_or(5432);
+    let user = if url.username().is_empty() {
+        "postgres".to_string()
+    } else {
+        url.username().to_string()
+    };
+    let password = url.password().map(percent_decode);
+    let database = url.path().trim_start_matches('/').to_string();
+    if database.is_empty() {
+        bail!("postgres URL has no database name: {raw:?}");
+    }
+    Ok(ResolvedDb {
+        engine: Engine::Postgres,
+        target: DbTarget::Postgres(PgTarget {
+            host,
+            port,
+            user,
+            password,
+            database,
+        }),
+    })
 }
 
 fn percent_decode(s: &str) -> String {
@@ -204,10 +286,13 @@ mod tests {
 
     #[test]
     fn parses_plain_paths() {
-        let db = parse_db_string("./prisma/dev.db").unwrap();
+        let db = parse_db_string("./prisma/dev.db", false).unwrap();
         assert_eq!(db.engine, Engine::Sqlite);
-        assert!(db.path.is_absolute());
-        assert!(db.path.ends_with("prisma/dev.db") || db.path.ends_with("prisma\\dev.db"));
+        let DbTarget::Sqlite(p) = db.target else {
+            panic!("expected sqlite target");
+        };
+        assert!(p.is_absolute());
+        assert!(p.ends_with("prisma/dev.db") || p.ends_with("prisma\\dev.db"));
     }
 
     #[test]
@@ -218,22 +303,56 @@ mod tests {
             "file:./x.db",
             "file:///C:/tmp/x.db",
         ] {
-            let db = parse_db_string(raw).unwrap();
+            let db = parse_db_string(raw, false).unwrap();
             assert_eq!(db.engine, Engine::Sqlite, "input: {raw}");
+            let DbTarget::Sqlite(p) = db.target else {
+                panic!("expected sqlite target for {raw}");
+            };
             assert!(
-                db.path.to_string_lossy().ends_with("x.db")
-                    || db.path.to_string_lossy().ends_with("tmp\\x.db")
-                    || db.path.to_string_lossy().ends_with("tmp/x.db"),
-                "input: {raw} -> {:?}",
-                db.path
+                p.to_string_lossy().ends_with("x.db")
+                    || p.to_string_lossy().ends_with("tmp\\x.db")
+                    || p.to_string_lossy().ends_with("tmp/x.db"),
+                "input: {raw} -> {p:?}"
             );
         }
     }
 
     #[test]
-    fn rejects_unsupported_engines() {
-        assert!(parse_db_string("postgres://localhost/app").is_err());
-        assert!(parse_db_string("mysql://root@127.0.0.1/app").is_err());
+    fn parses_postgres_urls() {
+        let db =
+            parse_db_string("postgres://dev:secret%20pass@localhost:5433/app_dev", false).unwrap();
+        assert_eq!(db.engine, Engine::Postgres);
+        let DbTarget::Postgres(ref pg) = db.target else {
+            panic!("expected postgres target");
+        };
+        assert_eq!(pg.host, "localhost");
+        assert_eq!(pg.port, 5433);
+        assert_eq!(pg.user, "dev");
+        assert_eq!(pg.password.as_deref(), Some("secret pass"));
+        assert_eq!(pg.database, "app_dev");
+        // display & fingerprint never contain the password
+        assert!(!pg.display().contains("secret"));
+        assert!(!db.fingerprint().target.contains("secret"));
+        assert_eq!(
+            pg.connstring(),
+            "host=localhost port=5433 user=dev dbname=app_dev"
+        );
+    }
+
+    #[test]
+    fn postgres_guard_blocks_remote_hosts() {
+        assert!(parse_db_string("postgres://u:p@db.example.com/app", false).is_err());
+        // ...but an explicit human override goes through
+        assert!(parse_db_string("postgres://u:p@db.example.com/app", true).is_ok());
+        assert!(parse_db_string("postgres://u:p@localhost/app", false).is_ok());
+        assert!(parse_db_string("postgres://u:p@127.0.0.1/app", false).is_ok());
+        // incomplete URL
+        assert!(parse_db_string("postgres://localhost", false).is_err());
+    }
+
+    #[test]
+    fn mysql_still_unsupported() {
+        assert!(parse_db_string("mysql://root@127.0.0.1/app", false).is_err());
     }
 
     #[test]

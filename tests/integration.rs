@@ -1,4 +1,5 @@
 use anyhow::Result;
+use dbsnap::engine::SaveMethod;
 use dbsnap::ops;
 use rusqlite::Connection;
 use std::fs;
@@ -42,6 +43,45 @@ fn add_rows(path: &Path, from: i64, to: i64) {
     }
 }
 
+/// Thin wrappers so every test below stays readable despite the full ops
+/// signatures (force / allow_remote / method).
+fn init(root: &Path, db: &Path) -> Result<String> {
+    ops::init_at(root, Some(db.to_str().unwrap()), false)
+}
+
+fn save(root: &Path, db: &Path, tag: &str) -> Result<String> {
+    ops::save_at(
+        root,
+        Some(db.to_str().unwrap()),
+        Some(tag.into()),
+        false,
+        false,
+        SaveMethod::Clone,
+    )
+}
+
+fn save_force(root: &Path, db: &Path, tag: &str) -> Result<String> {
+    ops::save_at(
+        root,
+        Some(db.to_str().unwrap()),
+        Some(tag.into()),
+        true,
+        false,
+        SaveMethod::Clone,
+    )
+}
+
+fn restore(root: &Path, db: &Path, tag: Option<&str>, safety: bool) -> Result<String> {
+    ops::restore_at(
+        root,
+        Some(db.to_str().unwrap()),
+        tag.map(str::to_string),
+        safety,
+        false,
+        false,
+    )
+}
+
 fn record_by_tag(root: &Path, tag: &str) -> dbsnap::storage::SnapshotRecord {
     let store = dbsnap::storage::Storage::find(root).unwrap();
     store.load_metadata().unwrap().find(Some(tag)).unwrap()
@@ -72,25 +112,20 @@ fn save_restore_cycle() -> Result<()> {
     let db = root.join("prisma/dev.db");
     create_db(&db, 5);
 
-    let out = ops::init_at(&root, Some(db.to_str().unwrap()))?;
+    let out = init(&root, &db)?;
     assert!(out.contains("initialized dbsnap"));
     assert!(
         out.contains("skill installed"),
         "init installs the agent skill"
     );
 
-    ops::save_at(
-        &root,
-        Some(db.to_str().unwrap()),
-        Some("seed".into()),
-        false,
-    )?;
+    save(&root, &db, "seed")?;
 
     add_rows(&db, 5, 15);
     assert_eq!(count_rows(&db), 15);
 
     // rollback = restore newest (seed) → data kembali 5 baris
-    let out = ops::restore_at(&root, Some(db.to_str().unwrap()), None, true, false)?;
+    let out = restore(&root, &db, None, true)?;
     assert!(out.contains("restored database"));
     assert_eq!(
         count_rows(&db),
@@ -114,9 +149,9 @@ fn unchanged_db_links_instead_of_copying() -> Result<()> {
     let db = root.join("dev.db");
     create_db(&db, 3);
 
-    ops::init_at(&root, Some(db.to_str().unwrap()))?;
-    let first = ops::save_at(&root, Some(db.to_str().unwrap()), Some("a".into()), false)?;
-    let second = ops::save_at(&root, Some(db.to_str().unwrap()), Some("b".into()), false)?;
+    init(&root, &db)?;
+    let first = save(&root, &db, "a")?;
+    let second = save(&root, &db, "b")?;
 
     // DB tidak berubah → snapshot kedua harus di-link, bukan menulis ulang
     assert!(second.contains("linked"), "second: {second}");
@@ -155,13 +190,8 @@ fn corrupt_delta_object_is_rejected_before_touching_db() -> Result<()> {
     let root = temp_root();
     let db = root.join("dev.db");
     create_db(&db, 4);
-    ops::init_at(&root, Some(db.to_str().unwrap()))?;
-    ops::save_at(
-        &root,
-        Some(db.to_str().unwrap()),
-        Some("good".into()),
-        false,
-    )?;
+    init(&root, &db)?;
+    save(&root, &db, "good")?;
 
     add_rows(&db, 4, 40);
     assert_eq!(count_rows(&db), 40);
@@ -173,7 +203,7 @@ fn corrupt_delta_object_is_rejected_before_touching_db() -> Result<()> {
     bytes[mid] ^= 0xff;
     fs::write(&obj, &bytes)?;
 
-    let result = ops::restore_at(&root, Some(db.to_str().unwrap()), None, false, false);
+    let result = restore(&root, &db, None, false);
     assert!(result.is_err(), "corrupt chunk must fail restore");
     assert_eq!(
         count_rows(&db),
@@ -188,18 +218,13 @@ fn prune_keeps_chunks_referenced_by_survivors() -> Result<()> {
     let root = temp_root();
     let db = root.join("dev.db");
     create_db(&db, 2);
-    ops::init_at(&root, Some(db.to_str().unwrap()))?;
+    init(&root, &db)?;
 
-    ops::save_at(&root, Some(db.to_str().unwrap()), Some("one".into()), false)?;
+    save(&root, &db, "one")?;
     // snapshot kedua identik → berbagi manifest + chunk dengan yang pertama
-    ops::save_at(&root, Some(db.to_str().unwrap()), Some("two".into()), false)?;
+    save(&root, &db, "two")?;
     add_rows(&db, 2, 3);
-    ops::save_at(
-        &root,
-        Some(db.to_str().unwrap()),
-        Some("three".into()),
-        false,
-    )?;
+    save(&root, &db, "three")?;
 
     // simpan dua terbaru → "one" dihapus, tapi manifest-nya dipakai "two"
     // dan chunk-nya dipakai "three" — semuanya harus tetap hidup
@@ -210,13 +235,7 @@ fn prune_keeps_chunks_referenced_by_survivors() -> Result<()> {
     assert_eq!(meta.snapshots.len(), 2);
 
     // survivor masih bisa di-restore penuh
-    ops::restore_at(
-        &root,
-        Some(db.to_str().unwrap()),
-        Some("two".into()),
-        false,
-        false,
-    )?;
+    restore(&root, &db, Some("two"), false)?;
     assert_eq!(count_rows(&db), 2, "restored from a shared manifest");
     Ok(())
 }
@@ -238,8 +257,8 @@ fn delta_only_writes_changed_chunks() -> Result<()> {
             .unwrap();
         }
     }
-    ops::init_at(&root, Some(db.to_str().unwrap()))?;
-    ops::save_at(&root, Some(db.to_str().unwrap()), Some("v1".into()), false)?;
+    init(&root, &db)?;
+    save(&root, &db, "v1")?;
     let v1 = record_by_tag(&root, "v1");
 
     // satu baris baru: hanya halaman pertama (change counter) + chunk terakhir
@@ -248,7 +267,7 @@ fn delta_only_writes_changed_chunks() -> Result<()> {
         conn.execute("INSERT INTO blobs (data) VALUES (?1)", [blob_text(9999)])
             .unwrap();
     }
-    ops::save_at(&root, Some(db.to_str().unwrap()), Some("v2".into()), false)?;
+    save(&root, &db, "v2")?;
     let v2 = record_by_tag(&root, "v2");
 
     assert!(
@@ -259,21 +278,9 @@ fn delta_only_writes_changed_chunks() -> Result<()> {
     );
 
     // kedua versi tetap bisa di-restore
-    ops::restore_at(
-        &root,
-        Some(db.to_str().unwrap()),
-        Some("v1".into()),
-        false,
-        false,
-    )?;
+    restore(&root, &db, Some("v1"), false)?;
     assert_eq!(blob_rows(&db), 64);
-    ops::restore_at(
-        &root,
-        Some(db.to_str().unwrap()),
-        Some("v2".into()),
-        false,
-        false,
-    )?;
+    restore(&root, &db, Some("v2"), false)?;
     assert_eq!(blob_rows(&db), 65);
     Ok(())
 }
@@ -304,7 +311,7 @@ fn legacy_file_snapshot_still_restorable() -> Result<()> {
     let root = temp_root();
     let db = root.join("dev.db");
     create_db(&db, 5);
-    ops::init_at(&root, Some(db.to_str().unwrap()))?;
+    init(&root, &db)?;
 
     let store = dbsnap::storage::Storage::find(&root).unwrap();
     let staged = store.tmp_dir().join("legacy-src.db");
@@ -331,13 +338,7 @@ fn legacy_file_snapshot_still_restorable() -> Result<()> {
     store.write_metadata(&meta)?;
 
     add_rows(&db, 5, 12);
-    ops::restore_at(
-        &root,
-        Some(db.to_str().unwrap()),
-        Some("legacy".into()),
-        false,
-        false,
-    )?;
+    restore(&root, &db, Some("legacy"), false)?;
     assert_eq!(count_rows(&db), 5, "legacy file snapshot restores exactly");
     Ok(())
 }
@@ -350,8 +351,15 @@ fn fingerprint_mismatch_blocks_without_force() -> Result<()> {
     create_db(&db_a, 1);
     create_db(&db_b, 1);
 
-    ops::init_at(&root, Some(db_a.to_str().unwrap()))?;
-    let result = ops::save_at(&root, Some(db_b.to_str().unwrap()), Some("x".into()), false);
+    init(&root, &db_a)?;
+    let result = ops::save_at(
+        &root,
+        Some(db_b.to_str().unwrap()),
+        Some("x".into()),
+        false,
+        false,
+        SaveMethod::Clone,
+    );
     assert!(result.is_err(), "mismatched target must be blocked");
     assert!(
         result.unwrap_err().to_string().contains("bound to"),
@@ -359,7 +367,7 @@ fn fingerprint_mismatch_blocks_without_force() -> Result<()> {
     );
 
     // --force melewati guard
-    ops::save_at(&root, Some(db_b.to_str().unwrap()), Some("x".into()), true)?;
+    save_force(&root, &db_b, "x")?;
     Ok(())
 }
 
@@ -368,17 +376,46 @@ fn missing_artifact_fails_without_touching_db() -> Result<()> {
     let root = temp_root();
     let db = root.join("dev.db");
     create_db(&db, 1);
-    ops::init_at(&root, Some(db.to_str().unwrap()))?;
-    ops::save_at(&root, Some(db.to_str().unwrap()), Some("v1".into()), false)?;
+    init(&root, &db)?;
+    save(&root, &db, "v1")?;
 
-    // hapus artefak snapshot (manifest delta) → stage_restore gagal sebelum
+    // hapus artefak snapshot (manifest delta) → stage gagal sebelum
     // menyentuh DB
     let store = dbsnap::storage::Storage::find(&root).unwrap();
     let meta = store.load_metadata()?;
     fs::remove_file(store.snapshot_path(&meta.snapshots[0])?)?;
-    let result = ops::restore_at(&root, Some(db.to_str().unwrap()), None, false, false);
+    let result = restore(&root, &db, None, false);
     assert!(result.is_err());
     assert_eq!(count_rows(&db), 1, "live db untouched");
+    Ok(())
+}
+
+#[test]
+fn engine_mismatch_is_rejected() -> Result<()> {
+    // Snapshot SQLite tidak boleh di-restore ke database PostgreSQL, dan
+    // sebaliknya — guard engine mismatch di ops::restore_with.
+    let Some(url) = pg_test_url() else {
+        return Ok(()); // PostgreSQL test server tidak tersedia
+    };
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "sqlite-side")?;
+
+    let result = ops::restore_at(
+        &root,
+        Some(&url),
+        Some("sqlite-side".into()),
+        false,
+        true, // force: beda fingerprint memang disengaja di test ini
+        false,
+    );
+    assert!(result.is_err(), "cross-engine restore must be rejected");
+    assert!(
+        result.unwrap_err().to_string().contains("engine mismatch"),
+        "error should explain the engine mismatch"
+    );
     Ok(())
 }
 
@@ -443,5 +480,154 @@ fn mcp_stdio_roundtrip() -> Result<()> {
         responses[2]
     );
     assert!(responses[3].contains("via-mcp"), "list: {}", responses[3]);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PostgreSQL — dijalankan hanya bila DBSNAP_TEST_PG_URL menunjuk server uji
+// lokal (CI: service container postgres:16; lokal: pg_ctl sendiri).
+// ---------------------------------------------------------------------------
+
+fn pg_test_url() -> Option<String> {
+    match std::env::var("DBSNAP_TEST_PG_URL") {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        _ => None,
+    }
+}
+
+/// Setiap test PG mendapat database unik sendiri — test berjalan paralel
+/// terhadap server yang sama dan tidak boleh saling menabrak.
+fn pg_setup_test_db(test: &str) -> Option<String> {
+    use std::str::FromStr;
+    let base = pg_test_url()?;
+    let mut parsed = url::Url::parse(&base).ok()?;
+    let cfg = postgres::Config::from_str(&base).ok()?;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dbname = format!(
+        "dbsnap_t{}_{}_{}",
+        test.replace('-', "_"),
+        std::process::id(),
+        n
+    );
+    let mut admin = cfg.connect(postgres::NoTls).ok()?;
+    admin
+        .batch_execute(&format!(
+            "DROP DATABASE IF EXISTS {dbname}; CREATE DATABASE {dbname};"
+        ))
+        .ok()?;
+    parsed.set_path(&format!("/{dbname}"));
+    Some(parsed.to_string())
+}
+
+fn pg_drop_test_db(url: &str) {
+    use std::str::FromStr;
+    let Ok(cfg) = postgres::Config::from_str(url) else {
+        return;
+    };
+    let dbname = cfg.get_dbname().unwrap_or("").to_string();
+    if let Ok(mut admin) = cfg.connect(postgres::NoTls) {
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {dbname};"))
+            .ok();
+    }
+}
+
+fn pg_exec(url: &str, sql: &str) -> Result<()> {
+    use std::str::FromStr;
+    let mut conn = postgres::Config::from_str(url)?.connect(postgres::NoTls)?;
+    conn.batch_execute(sql)?;
+    Ok(())
+}
+
+fn pg_count(url: &str) -> Result<i64> {
+    use std::str::FromStr;
+    let mut conn = postgres::Config::from_str(url)?.connect(postgres::NoTls)?;
+    Ok(conn.query_one("SELECT COUNT(*) FROM items", &[])?.get(0))
+}
+
+#[test]
+fn postgres_clone_roundtrip() -> Result<()> {
+    let Some(url) = pg_setup_test_db("clone") else {
+        return Ok(());
+    };
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "DROP TABLE IF EXISTS items;
+         CREATE TABLE items (id serial PRIMARY KEY, v text);
+         INSERT INTO items (v) SELECT 'v' || g FROM generate_series(1, 5) g;",
+    )?;
+
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "pgv1")?;
+
+    // "migrasi" destruktif
+    pg_exec(&url, "ALTER TABLE items DROP COLUMN v;")?;
+
+    // rollback: fence → safety clone → drop → rename → unfence
+    let out = restore(&root, Path::new(&url), None, true)?;
+    assert!(out.contains("restored database"));
+    assert_eq!(pg_count(&url)?, 5, "clone restore must bring data back");
+
+    // kolom v benar-benar kembali (fisik, bukan replay logis)
+    use std::str::FromStr;
+    let mut conn = postgres::Config::from_str(&url)?.connect(postgres::NoTls)?;
+    let v: String = conn
+        .query_one("SELECT v FROM items WHERE id = 1", &[])?
+        .get(0);
+    assert_eq!(v, "v1");
+
+    // safety snapshot tersimpan sebagai klon server-side tercatat
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let meta = store.load_metadata()?;
+    assert!(
+        meta.snapshots
+            .iter()
+            .any(|s| matches!(s.location, dbsnap::storage::Location::PgDatabase { .. })),
+        "restore must record the server-side safety clone"
+    );
+    Ok(())
+}
+
+#[test]
+fn postgres_dump_roundtrip() -> Result<()> {
+    let Some(url) = pg_setup_test_db("dump") else {
+        return Ok(());
+    };
+    // pg_dump/pg_restore harus ada di PATH
+    if std::process::Command::new("pg_dump")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return Ok(());
+    }
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "DROP TABLE IF EXISTS items;
+         CREATE TABLE items (id serial PRIMARY KEY, v text);
+         INSERT INTO items (v) SELECT 'v' || g FROM generate_series(1, 7) g;",
+    )?;
+
+    init(&root, Path::new(&url))?;
+    ops::save_at(
+        &root,
+        Some(&url),
+        Some("pgdump".into()),
+        false,
+        false,
+        SaveMethod::Dump,
+    )?;
+    let rec = record_by_tag(&root, "pgdump");
+    assert_eq!(rec.method, "pg-dump");
+    assert!(rec.size_bytes > 0);
+
+    pg_exec(&url, "DROP TABLE items;")?;
+    assert!(pg_count(&url).is_err(), "table is gone");
+
+    restore(&root, Path::new(&url), Some("pgdump"), false)?;
+    assert_eq!(pg_count(&url)?, 7, "dump restore must recreate the table");
+    pg_drop_test_db(&url);
     Ok(())
 }
