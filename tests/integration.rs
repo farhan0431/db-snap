@@ -696,8 +696,10 @@ fn my_test_url() -> Option<String> {
 
 /// Setiap test MySQL mendapat database unik sendiri (test berjalan paralel
 /// terhadap server yang sama).
-fn my_setup_test_db(test: &str) -> Option<String> {
-    let base = my_test_url()?;
+fn my_setup_test_db(test: &str) -> Result<Option<String>> {
+    let Some(base) = my_test_url() else {
+        return Ok(None);
+    };
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dbname = format!(
         "dbsnap_t{}_{}_{}",
@@ -709,10 +711,11 @@ fn my_setup_test_db(test: &str) -> Option<String> {
         &base,
         None,
         &format!("DROP DATABASE IF EXISTS {dbname}; CREATE DATABASE {dbname};"),
-    )
-    .ok()?;
-    let prefix = base.rsplit_once('/').map(|(p, _)| p.to_string())?;
-    Some(format!("{prefix}/{dbname}"))
+    )?;
+    let (prefix, _) = base
+        .rsplit_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid MySQL test URL"))?;
+    Ok(Some(format!("{prefix}/{dbname}")))
 }
 
 fn my_drop_test_db(url: &str) {
@@ -732,7 +735,7 @@ fn my_count(url: &str) -> Result<i64> {
 
 #[test]
 fn mysql_dump_roundtrip() -> Result<()> {
-    let Some(url) = my_setup_test_db("dump") else {
+    let Some(url) = my_setup_test_db("dump")? else {
         return Ok(());
     };
     let root = temp_root();
@@ -810,7 +813,17 @@ fn credentials_never_leak_into_output_or_metadata() -> Result<()> {
         );
     }
 
-    // file katalog juga tidak menyimpan kredensial
+    // A password appearing in the database name makes a substring test
+    // ambiguous; require an unambiguous test configuration instead of skipping.
+    let dbname_contains_password = url
+        .rsplit('/')
+        .next()
+        .map(|d| d.contains(&password))
+        .unwrap_or(false);
+    assert!(
+        !dbname_contains_password,
+        "test database name must not contain the password"
+    );
     let store = dbsnap::storage::Storage::find(&root).unwrap();
     for file in ["config.json", "metadata.json"] {
         let raw = fs::read_to_string(store.root.join(file))?;

@@ -259,7 +259,7 @@ fn prune_auto_snapshots(
     if autos.len() <= AUTO_SAFETY_KEEP {
         return Ok(());
     }
-    autos.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    autos.sort_by_key(|a| std::cmp::Reverse(a.created_at));
     let victims: Vec<SnapshotRecord> = autos.split_off(AUTO_SAFETY_KEEP);
     meta.snapshots
         .retain(|s| !victims.iter().any(|v| v.id == s.id));
@@ -370,7 +370,7 @@ pub fn list_with(ctx: &Ctx) -> Result<String> {
         return Ok("no snapshots yet — create one with: dbsnap save \"my-tag\"".to_string());
     }
     let mut snaps = meta.snapshots.clone();
-    snaps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    snaps.sort_by_key(|a| std::cmp::Reverse(a.created_at));
 
     let mut ids: Vec<String> = snaps.iter().map(|s| s.id.clone()).collect();
     let mut tags: Vec<String> = snaps.iter().map(|s| s.tag.clone()).collect();
@@ -429,7 +429,7 @@ pub fn prune_at(root: &Path, explicit: Option<&str>, keep: usize) -> Result<Stri
 pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
     let mut meta = ctx.store.load_metadata()?;
     meta.snapshots
-        .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        .sort_by_key(|a| std::cmp::Reverse(a.created_at));
 
     let mut freed = 0u64;
     let mut removed = 0usize;

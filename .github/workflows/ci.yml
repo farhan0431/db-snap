@@ -33,7 +33,7 @@ jobs:
         env:
           POSTGRES_USER: dbsnap
           POSTGRES_PASSWORD: dbsnap
-          POSTGRES_DB: dbsnap_admin
+          POSTGRES_DB: app_admin
         ports:
           - 5433:5432
         options: >-
@@ -48,23 +48,26 @@ jobs:
       - name: Tests (PostgreSQL engine)
         run: cargo test
         env:
-          DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@localhost:5433/dbsnap_admin
+          DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@localhost:5433/app_admin
 
   test-mysql:
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: mysql:8
+        image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: dbsnap
-          MYSQL_DATABASE: dbsnap_admin
+          MYSQL_DATABASE: app_admin
         ports:
           - 3307:3306
+        # mysql_native_password so the runner's MariaDB client (no
+        # caching_sha2_password plugin) can authenticate
         options: >-
           --health-cmd "mysqladmin ping -h localhost -uroot -pdbsnap"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+        command: --default-authentication-plugin=mysql_native_password
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,7 +75,7 @@ jobs:
       - name: Tests (MySQL engine)
         run: cargo test
         env:
-          DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/dbsnap_admin
+          DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/app_admin
 
   test-mariadb:
     runs-on: ubuntu-latest
@@ -81,7 +84,7 @@ jobs:
         image: mariadb:11
         env:
           MARIADB_ROOT_PASSWORD: dbsnap
-          MARIADB_DATABASE: dbsnap_admin
+          MARIADB_DATABASE: app_admin
         ports:
           - 3308:3306
         options: >-
@@ -96,7 +99,7 @@ jobs:
       - name: Tests (MariaDB engine)
         run: cargo test
         env:
-          DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/dbsnap_admin
+          DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/app_admin
 
   security:
     runs-on: ubuntu-latest
