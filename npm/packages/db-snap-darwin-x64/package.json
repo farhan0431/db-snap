@@ -1,6 +1,6 @@
 {
   "name": "db-snap-darwin-x64",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "dbsnap binary for macOS Intel (darwin-x64)",
   "license": "MIT",
   "os": ["darwin"],
