@@ -107,6 +107,91 @@ impl PostgresEngine {
         Self { pg }
     }
 
+    /// Compare catalogued server-side clones using read-only transactions.
+    /// Dump archives must not be replayed into a live server for inspection.
+    pub fn diff(&self, left: &SnapshotRecord, right: &SnapshotRecord) -> Result<String> {
+        use std::collections::BTreeMap;
+        type Objects = BTreeMap<(String, String), (String, Option<i64>)>;
+        fn inspect(engine: &PostgresEngine, record: &SnapshotRecord) -> Result<Objects> {
+            let name = match &record.location {
+                Location::PgDatabase { name } if name == &format!("{SNAP_PREFIX}{}", record.id) && record.method == "pg-clone" => name,
+                _ => bail!("PostgreSQL diff currently supports server-side clone snapshots only; dump archives are not supported"),
+            };
+            let mut client = engine.connect(name)?;
+            let mut tx = client.build_transaction().read_only(true).start()?;
+            let rows = tx.query("SELECT n.nspname, c.relname, c.relkind::text, COALESCE(pg_get_viewdef(c.oid, true), '') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND c.relkind IN ('r','p','v','m') ORDER BY 1,2", &[])?;
+            let mut objects = BTreeMap::new();
+            for row in rows {
+                let schema: String = row.get(0);
+                let name: String = row.get(1);
+                let relkind: String = row.get(2);
+                let view: String = row.get(3);
+                let kind = if relkind == "r" || relkind == "p" {
+                    "table"
+                } else {
+                    "view"
+                };
+                let qualified = format!("{schema}.{name}");
+                let schema_rows = tx.query("SELECT a.attname, pg_catalog.format_type(a.atttypid,a.atttypmod), a.attnotnull, COALESCE(pg_get_expr(d.adbin,d.adrelid),'') FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname=$1 AND c.relname=$2 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum", &[&schema, &name])?;
+                let mut definition = view;
+                for col in schema_rows {
+                    let column: String = col.get(0);
+                    let datatype: String = col.get(1);
+                    let not_null: bool = col.get(2);
+                    let default: String = col.get(3);
+                    definition
+                        .push_str(&format!("{column:?}:{datatype:?}:{not_null}:{default:?};"));
+                }
+                let count = if kind == "table" {
+                    let sql = format!(
+                        "SELECT COUNT(*) FROM {}.{}",
+                        PostgresEngine::quote_ident(&schema),
+                        PostgresEngine::quote_ident(&name)
+                    );
+                    Some(tx.query_one(&sql, &[])?.get::<_, i64>(0))
+                } else {
+                    None
+                };
+                objects.insert((kind.to_string(), qualified), (definition, count));
+            }
+            tx.rollback()?;
+            Ok(objects)
+        }
+        let a = inspect(self, left)?;
+        let b = inspect(self, right)?;
+        let mut changes = Vec::new();
+        for (key, old) in &a {
+            match b.get(key) {
+                None => changes.push(format!("removed {} {}", key.0, key.1)),
+                Some(new) => {
+                    if old.0 != new.0 {
+                        changes.push(format!("changed schema {} {}", key.0, key.1));
+                    }
+                    if old.1 != new.1 {
+                        changes.push(format!(
+                            "table {} rows: {} -> {}",
+                            key.1,
+                            old.1.unwrap_or(0),
+                            new.1.unwrap_or(0)
+                        ));
+                    }
+                }
+            }
+        }
+        for key in b.keys() {
+            if !a.contains_key(key) {
+                changes.push(format!("added {} {}", key.0, key.1));
+            }
+        }
+        if changes.is_empty() {
+            changes.push("no table/view schema or row-count differences".into());
+        }
+        Ok(format!(
+            "{}\n(row contents, indexes, constraints, routines and triggers are not compared)",
+            changes.join("\n")
+        ))
+    }
+
     fn use_verified_tls(&self) -> bool {
         let loopback = self.pg.host.eq_ignore_ascii_case("localhost")
             || self

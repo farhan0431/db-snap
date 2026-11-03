@@ -1074,6 +1074,35 @@ fn pg_count(url: &str) -> Result<i64> {
 }
 
 #[test]
+fn postgres_clone_diff_is_read_only() -> Result<()> {
+    let Some(url) = pg_setup_test_db("diff")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "CREATE TABLE items (id INT PRIMARY KEY); INSERT INTO items VALUES (1);",
+    )?;
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "before")?;
+    pg_exec(&url, "INSERT INTO items VALUES (2); ALTER TABLE items ADD COLUMN name TEXT; CREATE TABLE extra (id INT);")?;
+    save(&root, Path::new(&url), "after")?;
+    let output = ops::diff_at(&root, Some(&url), "before", "after")?;
+    assert!(
+        output.contains("changed schema table public.items"),
+        "{output}"
+    );
+    assert!(
+        output.contains("table public.items rows: 1 -> 2"),
+        "{output}"
+    );
+    assert!(output.contains("added table public.extra"), "{output}");
+    assert!(output.contains("row contents"), "{output}");
+    assert_eq!(pg_count(&url)?, 2);
+    Ok(())
+}
+
+#[test]
 fn postgres_clone_roundtrip() -> Result<()> {
     let Some(url) = pg_setup_test_db("clone")? else {
         return Ok(());
@@ -1503,6 +1532,177 @@ fn my_count(url: &str) -> Result<i64> {
 }
 
 #[test]
+fn mysql_diff_reads_dumps_without_changing_live_database() -> Result<()> {
+    let Some(url) = my_setup_test_db("diff")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    let db = url.rsplit('/').next().unwrap();
+    my_exec_url(&url, Some(db), "CREATE TABLE items(id INT PRIMARY KEY, v TEXT); INSERT INTO items VALUES(1,'a),(b'); CREATE VIEW visible_items AS SELECT id FROM items;")?;
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "before")?;
+    my_exec_url(&url, Some(db), "INSERT INTO items VALUES(2,'b'); ALTER TABLE items ADD COLUMN extra INT; CREATE TABLE projects(id INT);")?;
+    save(&root, Path::new(&url), "after")?;
+    let output = ops::diff_at(&root, Some(&url), "before", "after")?;
+    assert!(output.contains("table items rows: 1 -> 2"), "{output}");
+    assert!(output.contains("changed schema table items"), "{output}");
+    assert!(output.contains("added table projects"), "{output}");
+    assert!(!output.contains("table visible_items"), "{output}");
+    assert_eq!(my_count(&url)?, 2);
+    assert!(ops::diff_at(&root, Some(&url), "after", "after")?
+        .contains("no table schema or row-count differences"));
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let record = record_by_tag(&root, "after");
+    fs::write(store.snapshot_path(&record)?, b"corrupt")?;
+    assert!(ops::diff_at(&root, Some(&url), "before", "after").is_err());
+    assert_eq!(fs::read_dir(store.tmp_dir())?.count(), 0);
+    my_drop_test_db(&url);
+    Ok(())
+}
+
+#[test]
+fn mysql_safety_sync_failure_cleans_artifact_without_touching_target() -> Result<()> {
+    let Some(url) = my_setup_test_db("safety_sync")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    let db = url.rsplit('/').next().unwrap();
+    my_exec_url(
+        &url,
+        Some(db),
+        "CREATE TABLE items(id INT); INSERT INTO items VALUES(1)",
+    )?;
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "before")?;
+    my_exec_url(&url, Some(db), "INSERT INTO items VALUES(2)")?;
+    let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .env("DATABASE_URL", &url)
+        .env("DBSNAP_FAILPOINT", "mysql_disk_full_before_safety_sync")
+        .args(["restore", "before"])
+        .output()?;
+    assert!(!failed.status.success());
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    assert_eq!(my_count(&url)?, 2);
+    assert_eq!(store.load_metadata()?.snapshots.len(), 1);
+    assert_eq!(fs::read_dir(store.snapshots_dir())?.count(), 1);
+    assert_eq!(fs::read_dir(store.tmp_dir())?.count(), 0);
+    assert!(!store.root.join("mysql-restore.json").exists());
+    let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .env("DATABASE_URL", &url)
+        .env("DBSNAP_FAILPOINT", "mysql_disk_full_after_safety_metadata")
+        .args(["restore", "before"])
+        .output()?;
+    assert!(!failed.status.success());
+    assert_eq!(my_count(&url)?, 2);
+    let committed = store.load_metadata()?;
+    assert_eq!(committed.snapshots.len(), 2);
+    for record in committed.snapshots {
+        assert!(store.snapshot_path(&record)?.exists());
+    }
+    assert!(!store.root.join("mysql-restore.json").exists());
+    my_drop_test_db(&url);
+    Ok(())
+}
+
+#[test]
+fn mysql_pending_recovery_requires_a_pinned_snapshot() -> Result<()> {
+    let Some(url) = my_setup_test_db("recovery_pin")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    let db = url.rsplit('/').next().unwrap();
+    my_exec_url(
+        &url,
+        Some(db),
+        "CREATE TABLE items(id INT); INSERT INTO items VALUES(1)",
+    )?;
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "before")?;
+    my_exec_url(&url, Some(db), "INSERT INTO items VALUES(2)")?;
+    let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .env("DATABASE_URL", &url)
+        .env("DBSNAP_FAILPOINT", "mysql_exit_after_journal")
+        .args(["restore", "before"])
+        .output()?;
+    assert!(!failed.status.success());
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let recovery: String =
+        serde_json::from_slice(&fs::read(store.root.join("mysql-restore.json"))?)?;
+    let mut meta = store.load_metadata()?;
+    meta.snapshots
+        .iter_mut()
+        .find(|r| r.id == recovery)
+        .unwrap()
+        .pinned = false;
+    store.write_metadata(&meta)?;
+    let error = restore(&root, Path::new(&url), Some(&recovery), true).unwrap_err();
+    assert!(format!("{error:#}").contains("not pinned"));
+    assert_eq!(my_count(&url)?, 2);
+    meta.snapshots
+        .iter_mut()
+        .find(|r| r.id == recovery)
+        .unwrap()
+        .pinned = true;
+    store.write_metadata(&meta)?;
+    restore(&root, Path::new(&url), Some(&recovery), true)?;
+    assert_eq!(my_count(&url)?, 2);
+    my_drop_test_db(&url);
+    Ok(())
+}
+
+#[test]
+fn mysql_restore_refuses_active_clients_and_events() -> Result<()> {
+    let Some(url) = my_setup_test_db("busy")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    let db = url.rsplit('/').next().unwrap().to_string();
+    my_exec_url(
+        &url,
+        Some(&db),
+        "CREATE TABLE items(id INT); INSERT INTO items VALUES(1)",
+    )?;
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "before")?;
+    let sleeper_url = url.clone();
+    let sleeper_db = db.clone();
+    let sleeper =
+        std::thread::spawn(move || my_run(&sleeper_url, Some(&sleeper_db), "SELECT SLEEP(60)"));
+    let mut connection = None;
+    for _ in 0..30 {
+        let id = my_run(&url, None, &format!("SELECT ID FROM information_schema.PROCESSLIST WHERE DB='{db}' AND INFO LIKE 'SELECT SLEEP%'"))?;
+        if let Ok(id) = id.trim().parse::<u64>() {
+            connection = Some(id);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let id = connection.expect("test client must become visible");
+    let result = restore(&root, Path::new(&url), Some("before"), true);
+    my_exec_url(&url, None, &format!("KILL {id}"))?;
+    let _ = sleeper.join().unwrap();
+    assert!(format!("{:#}", result.unwrap_err()).contains("connected clients"));
+    assert_eq!(my_count(&url)?, 1);
+    if my_run(&url, None, "SELECT @@GLOBAL.event_scheduler")?
+        .trim()
+        .eq_ignore_ascii_case("ON")
+    {
+        my_exec_url(
+            &url,
+            Some(&db),
+            "CREATE EVENT busy_event ON SCHEDULE EVERY 1 DAY DO SET @qa=1",
+        )?;
+        let error = restore(&root, Path::new(&url), Some("before"), true).unwrap_err();
+        assert!(format!("{error:#}").contains("scheduled events"));
+    }
+    my_drop_test_db(&url);
+    Ok(())
+}
+
+#[test]
 fn mysql_dump_roundtrip_and_failure_recovery() -> Result<()> {
     let Some(url) = my_setup_test_db("dump")? else {
         return Ok(());
@@ -1520,7 +1720,7 @@ fn mysql_dump_roundtrip_and_failure_recovery() -> Result<()> {
          CREATE FUNCTION audit_func() RETURNS INT DETERMINISTIC RETURN 7;
          CREATE VIEW audit_view AS SELECT id FROM items;
          CREATE TRIGGER audit_trigger BEFORE INSERT ON items FOR EACH ROW SET NEW.id = NEW.id;
-         CREATE EVENT audit_event ON SCHEDULE EVERY 1 DAY DO SET @dbsnap_e2e = 1;",
+         CREATE EVENT audit_event ON SCHEDULE EVERY 1 DAY DISABLE DO SET @dbsnap_e2e = 1;",
     )?;
 
     init(&root, Path::new(&url))?;
@@ -1594,7 +1794,32 @@ fn mysql_dump_roundtrip_and_failure_recovery() -> Result<()> {
     );
     restore(&root, Path::new(&url), Some("myv1"), true)?;
     my_exec_url(&url, Some(&db), "INSERT INTO items VALUES(6,'recover me')")?;
-    for phase in ["mysql_after_cleanup", "mysql_exit_after_cleanup"] {
+    for phase in [
+        "mysql_disk_full_before_stage",
+        "mysql_disk_full_before_safety",
+        "mysql_disk_full_before_safety_metadata",
+        "mysql_disk_full_before_journal",
+    ] {
+        let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+            .current_dir(&root)
+            .env("DATABASE_URL", &url)
+            .env("DBSNAP_FAILPOINT", phase)
+            .args(["restore", "myv1"])
+            .output()?;
+        assert!(!failed.status.success(), "{phase}");
+        assert_eq!(my_count(&url)?, 6, "{phase} must preserve target");
+        assert!(!store.root.join("mysql-restore.json").exists(), "{phase}");
+    }
+    for phase in [
+        "mysql_after_cleanup",
+        "mysql_exit_after_cleanup",
+        "mysql_exit_after_journal",
+        "mysql_disk_full_after_journal",
+        "mysql_disk_full_before_replay",
+        "mysql_exit_before_replay",
+        "mysql_exit_after_replay",
+        "mysql_disk_full_after_replay",
+    ] {
         let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
             .current_dir(&root)
             .env("DATABASE_URL", &url)
@@ -1617,7 +1842,7 @@ fn mysql_dump_roundtrip_and_failure_recovery() -> Result<()> {
     // A valid checksum does not imply valid SQL. A real client replay error
     // must leave the safety snapshot usable, just like process interruption.
     let raw = root.join("invalid.sql");
-    fs::write(&raw, format!("USE `{db}`;\nTHIS IS INVALID SQL;\n"))?;
+    fs::write(&raw, format!("USE `{db}`;\nCREATE TABLE partial_replay (id INT);\nINSERT INTO partial_replay VALUES (123);\nTHIS IS INVALID SQL;\n"))?;
     let mut broken = rec.clone();
     broken.id = "f00dbad".into();
     broken.tag = "invalid-sql".into();
@@ -1634,10 +1859,15 @@ fn mysql_dump_roundtrip_and_failure_recovery() -> Result<()> {
     store.write_metadata(&metadata)?;
     let error = restore(&root, Path::new(&url), Some("invalid-sql"), true).unwrap_err();
     assert!(format!("{error:#}").contains("MySQL replay failed"));
+    assert_eq!(
+        my_run(&url, Some(&db), "SELECT id FROM partial_replay")?.trim(),
+        "123"
+    );
     let recovery: String =
         serde_json::from_slice(&fs::read(store.root.join("mysql-restore.json"))?)?;
     restore(&root, Path::new(&url), Some(&recovery), true)?;
     assert_eq!(my_count(&url)?, 6);
+    assert!(my_run(&url, Some(&db), "SELECT * FROM partial_replay").is_err());
 
     assert_eq!(
         my_run(&other_url, Some(other_db), "SELECT id FROM sentinel")?.trim(),

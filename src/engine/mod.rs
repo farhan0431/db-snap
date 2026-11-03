@@ -1,4 +1,5 @@
 pub mod mysql;
+mod mysql_diff;
 pub mod postgres;
 pub mod sqlite;
 

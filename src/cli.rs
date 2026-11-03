@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
     name = "dbsnap",
     version,
     about = "Instant database time-machine for AI agents & vibe coders",
-    long_about = "dbsnap saves and restores physical snapshots of your local database —\nlike git commit / git checkout for your data. Works while your dev server\nis running, in milliseconds, and ships with a built-in MCP server so AI\nagents can protect and heal the database themselves."
+    long_about = "dbsnap saves and restores snapshots of local development databases.\nSQLite uses page backups, PostgreSQL supports clones and dumps, and\nMySQL/MariaDB uses logical dumps. Includes an MCP stdio server.\nMySQL restores require stopped writers and are not atomic."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -47,7 +47,7 @@ pub enum Command {
         tag_or_id: Option<String>,
         #[arg(long)]
         db: Option<String>,
-        /// Skip the automatic safety snapshot of the current state
+        /// Skip the automatic safety snapshot (not supported for fresh MySQL restores)
         #[arg(long)]
         no_safety_snapshot: bool,
         /// Deliberately operate on a non-local host (safety guard override)
@@ -85,7 +85,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Compare schema and row counts between two SQLite snapshots
+    /// Compare snapshot schema and row counts (SQLite, PostgreSQL clones, MySQL/MariaDB)
     Diff {
         /// Older snapshot ID or tag
         from: String,

@@ -103,7 +103,7 @@ DATABASE_URL="$URL" "$BIN" save before-migration
 echo "== destructive migration: ALTER TABLE users DROP COLUMN email =="
 PGSERVICEFILE="$SERVICE_FILE" PGSERVICE=dbsnap_test "$PSQL" -w -X -v ON_ERROR_STOP=1 -q -c "ALTER TABLE users DROP COLUMN email;"
 
-echo "== rollback (fence -> safety clone -> drop -> rename -> unfence) =="
+echo "== rollback (working clone -> fence -> safety -> journaled rename -> unfence) =="
 DATABASE_URL="$URL" "$BIN" rollback
 
 echo "== verify: column + expected test data must be back =="

@@ -1,7 +1,7 @@
 # db-snap (binary: dbsnap)
 
-> Instant database time-machine + MCP server for AI coding agents.
-> Physical, DDL-proof snapshots for SQLite, PostgreSQL, and MySQL/MariaDB.
+> Development database snapshots + MCP server for AI coding agents.
+> SQLite page backups, PostgreSQL clones/dumps, and MySQL/MariaDB logical dumps.
 > Single Rust binary. Open source (MIT).
 
 ## If a user asks to install or use this tool
@@ -21,15 +21,23 @@
 
 ## What it does
 
-- `dbsnap save "tag"` / MCP `dbsnap_create_snapshot` — instant physical
-  snapshot (SQLite <10 ms, PostgreSQL ~1 s server-side clone, MySQL consistent
-  dump). Agents MUST snapshot before migrations/DDL/bulk changes.
-- `dbsnap rollback` / `dbsnap_restore_snapshot` — verified, self-healing
-  restore with an automatic safety snapshot of the current state.
+- `dbsnap save "tag"` / MCP `dbsnap_create_snapshot` — save before migrations,
+  DDL or bulk changes. Runtime and disruption depend on the engine/data size.
+- `dbsnap rollback` / `dbsnap_restore_snapshot` — restore with a safety snapshot.
+  MySQL/MariaDB restoration is non-atomic and requires stopped writers/events.
+  Interrupted restores may require manual recovery; preserve the recovery journal.
+- `dbsnap diff before after` / `dbsnap_diff` — schema and row-count comparison
+  for SQLite, PostgreSQL clones, and standard MySQL/MariaDB table dumps.
+  Row contents are not compared; PostgreSQL dump diff is unsupported.
 - `dbsnap_status`, `dbsnap_list_snapshots` — visibility before acting.
-- Safety: local-only by default (MCP cannot target remote hosts), project
+- Safety: MCP permits SQLite/loopback only; CLI also permits private-network
+  hosts by default. A local host is not proof of a safe database. Project
   fingerprint binding, verify-before-restore, prune is a real GC.
   Full threat model: [docs/DESIGN.md](docs/DESIGN.md) §4.
+- MCP restore/prune require `--allow-destructive` and per-call elicitation;
+  clients without elicitation support fail closed.
+- Current limitations: [docs/AUDIT-STATUS.md](docs/AUDIT-STATUS.md).
+- Reproducible CLI, MCP and fault tests: [docs/TESTING.md](docs/TESTING.md).
 
 ## Contributing to this repository
 

@@ -11,11 +11,14 @@ the MCP server (see [INSTALL.md](INSTALL.md)).
 cargo build --release          # single binary at target/release/dbsnap(.exe)
 cargo fmt --all -- --check     # CI enforces
 cargo clippy --all-targets -- -D warnings   # CI enforces
-cargo test                     # 29 tests; SQLite always runs
+cargo test                     # unit/integration suite; SQLite always runs
 DBSNAP_TEST_PG_URL="postgres://postgres@localhost:5433/postgres" cargo test   # + PostgreSQL tests
 DBSNAP_TEST_MYSQL_URL="mysql://root@127.0.0.1:3306/mysql" cargo test          # + MySQL/MariaDB tests
 scripts/e2e.sh && scripts/e2e-pg.sh && scripts/e2e-mysql.sh   # live demos (release binary)
 ```
+
+For actual CLI/MCP process tests and bounded storage-full regressions, see
+[docs/TESTING.md](docs/TESTING.md). Use disposable servers only.
 
 ## Map
 

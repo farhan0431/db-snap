@@ -10,7 +10,7 @@ document covers the basics; the architecture lives in
 git clone https://github.com/farhan0431/db-snap
 cd db-snap
 cargo build            # bundles SQLite, no other system deps
-cargo test             # 15 unit + 14 integration tests
+cargo test             # unit/integration tests; live engines need test URLs
 ```
 
 ### Testing against real servers
@@ -32,7 +32,15 @@ cargo build --release
 scripts/e2e.sh       # SQLite: hot snapshot/rollback under a live writer
 scripts/e2e-pg.sh    # PostgreSQL: clone, DROP COLUMN, rollback
 scripts/e2e-mysql.sh # MySQL/MariaDB: dump, DROP COLUMN, rollback
+python scripts/test-cli-mcp.py --engine sqlite --binary target/release/dbsnap
+python scripts/test-cli-mcp.py --engine postgres --binary target/release/dbsnap
+python scripts/test-cli-mcp.py --engine mysql --binary target/release/dbsnap --disk-full
 ```
+
+Use `.exe` on Windows. See [docs/TESTING.md](docs/TESTING.md) for full CLI/MCP
+coverage, safe disposable-server setup, real ENOSPC checks, and fault-injection
+boundaries. MySQL restoration remains non-atomic; stop writers and scheduled
+events before restore. Do not equate a green test run with production readiness.
 
 ## Ground rules
 

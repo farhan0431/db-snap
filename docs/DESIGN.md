@@ -53,16 +53,14 @@ ALTER DATABASE dev_db WITH ALLOW_CONNECTIONS true;
 - `ALTER DATABASE ... ALLOW_CONNECTIONS` & `pg_terminate_backend()` butuh hak pemilik/superuser — normal untuk dev lokal.
 - Sifat: snapshot hidup di server → **hilang jika volume/container Postgres dibuang**. Untuk artefak tahan-lama: `dbsnap save --method dump` menjalankan `pg_dump -Fc` ke `.dbsnap/snapshots/<id>.dump.zst` (portabel, bisa dipindah antar mesin).
 
-**Restore (satu jendela fencing saja):**
-```sql
-ALTER DATABASE dev_db WITH ALLOW_CONNECTIONS false;
-SELECT pg_terminate_backend(...);
-CREATE DATABASE __dbsnap_auto_<ts> TEMPLATE dev_db;   -- safety snapshot otomatis (§4-T7)
-DROP DATABASE dev_db;
-ALTER DATABASE __dbsnap_a1b2c3 RENAME TO dev_db;       -- rename = instan
-ALTER DATABASE dev_db WITH ALLOW_CONNECTIONS true;
-```
-- Restore dari `--method dump`: `pg_restore -d postgres --create --clean` (lebih lambat, hanya dipakai bila snapshot clone sudah tidak ada di server).
+**Restore:** clone sumber dipertahankan. Engine membuat working clone dengan
+nama `__dbsnap_restore_*`, mencatat journal, mem-fence target, dan membuat safety
+snapshot. Target lama di-rename ke `__dbsnap_previous_*`, lalu working clone
+menjadi target. Penghapusan database hanya berlaku pada nama terkelola ber-prefix
+`__dbsnap_`. Cutover tidak atomik; keadaan ambigu memerlukan pemeriksaan manual.
+Dump di-replay dengan `pg_restore --exit-on-error --no-owner` ke staging terlebih
+dahulu, lalu memakai alur cutover yang sama. Dump PostgreSQL berupa custom
+archive `.dump`, bukan file zstd.
 
 **Aturan keras PostgreSQL:**
 1. Hanya pernah membuat/mengubah/menghapus database ber-prefix `__dbsnap_` atau DB target yang fingerprint-nya cocok (§4-T2). **Tidak pernah** menyentuh database lain, `template0`, `template1`, `postgres`.
@@ -91,7 +89,8 @@ mysqldump --single-transaction --routines --triggers --events \
   | zstd | tulis .dbsnap/snapshots/<id>.sql.zst  (hash blake3 sambil streaming)
 ```
 - `--single-transaction` = konsisten untuk InnoDB **tanpa menahan writer** (tidak mengganggu dev server).
-- Keterbatasan diunggahkan: MyISAM tidak terjamin konsistensinya dengan `--single-transaction` (opsi `--lock-all-tables` tersedia via `--dump-extra-args`).
+- MyISAM tidak terjamin konsistensinya dengan `--single-transaction`. CLI saat
+  ini tidak menyediakan `--dump-extra-args`; gunakan InnoDB untuk alur ini.
 - Host `localhost` **selalu diterjemahkan ke `127.0.0.1`** untuk klien TCP — di Linux klien `mysql` dengan host `localhost` mencoba unix socket dan sering gagal di setup Docker. (Gotcha nyata.)
 
 **Restore:** replay langsung pada database asal, bukan staging. Dump lama memakai
@@ -107,7 +106,11 @@ terjadi interupsi. Dump harus tepercaya; tidak ada sandbox SQL.
 
 ## 3. Arsitektur Bersama (supaya tiga engine menyatu rapi)
 
-### 3.1 Trait `DatabaseEngine` (final)
+### 3.1 Trait `DatabaseEngine` (sketsa arsitektur)
+
+Sketsa berikut adalah rancangan awal, bukan signature API saat ini. Implementasi
+sinkron yang digunakan CLI/MCP ada di `src/engine/mod.rs`; seluruh command masuk
+melalui `src/ops.rs`.
 
 ```rust
 #[async_trait::async_trait]
@@ -150,7 +153,10 @@ pub trait DatabaseEngine: Send + Sync {
 ```
 - `location.kind`: `"file"` (SQLite/MySQL/PG-dump — path relatif `.dbsnap/`), `"manifest"` (delta CAS, sejak v0.1.5), atau `"pg_database"` (server-side).
 - **Tidak ada kredensial yang pernah disimpan** — fingerprint hanya engine+host+port+database (SQLite: path absolut kanonikal).
-- Penulisan metadata selalu *atomic*: tulis `.dbsnap/tmp/metadata.json.tmp` → `rename` (anti-torn, §4-T4).
+- Metadata ditulis ke `.dbsnap/metadata.tmp`, di-sync, lalu di-rename ke
+  `metadata.json`; directory sync dilakukan pada Unix. Ketahanan power-loss
+  lintas platform belum dibuktikan. Contoh JSON di atas adalah sketsa; gunakan
+  `dbsnap list --json` dan `src/storage/mod.rs` untuk format aktual.
 
 ### 3.3 Layout `.dbsnap/` final
 
@@ -159,7 +165,7 @@ pub trait DatabaseEngine: Send + Sync {
 ├── config.json        # fingerprint proyek (dibuat saat init, diverifikasi tiap perintah)
 ├── metadata.json
 ├── lock               # file lock fs4 — semua operasi harus memegangnya
-├── tmp/               # decompress/verify sebelum menyentuh DB; dibersihkan prune
+├── tmp/               # staging; dibersihkan guard pada error normal, orphan crash dapat tertinggal
 ├── snapshots/
 │   └── <id>.zst       # mode full-copy (v0.1): NAMA FILE HANYA ID — tag hidup di metadata (§4-T9)
 ├── manifests/
@@ -216,15 +222,15 @@ DB kecil–menengah (10–200 MB — mayoritas kasus dev) sudah instan di mode f
 | T1 | `DATABASE_URL` menunjuk database **remote/production** | CLI mengizinkan loopback dan jaringan privat secara default; host lain memerlukan `--allow-remote`. MCP hanya mengizinkan SQLite dan host loopback. Tidak ada pemeriksaan host yang membuktikan database tersebut bukan production. |
 | T2 | Snapshot proyek A di-restore ke database proyek B (agent salah direktori) | `config.json` menyimpan fingerprint; setiap perintah memverifikasi target sekarang ≠ fingerprint → tolak, kecuali `--cross-project` eksplisit. Fingerprint juga tertanam di tiap record snapshot. |
 | T3 | Restore snapshot yang korup/terpotong | SQLite dan dump diverifikasi sebelum restore. Clone PostgreSQL hanya diperiksa keberadaannya; fingerprint metadata bukan checksum isi. |
-| T4 | Metadata.json sobek (proses mati saat save) | Tulis atomic tmp→rename; file snapshot juga ditulis ke tmp lalu di-rename **setelah** metadata commit. |
+| T4 | Metadata.json sobek (proses mati saat save) | Metadata: tulis, sync, rename, Unix directory sync. Artefak ditulis sebelum katalog; orphan akibat proses mati masih mungkin. |
 | T5 | Dua proses dbsnap bersamaan (human + agent) | `lock` file via `fs4` — blocking dengan timeout 10 dtk, pesan error jelas siapa yang memegang. MCP server memakai lock yang sama. |
 | T6 | Proses mati di tengah fencing PG (koneksi developer terkunci permanen) | Re-enable `ALLOW_CONNECTIONS` idempoten di awal+akhir tiap operasi PG; `dbsnap status` mendeteksi & memperbaiki sisa fencing. |
 | T7 | Restore gagal di tengah jalan | SQLite dan PostgreSQL membuat safety snapshot secara default (`--no-safety-snapshot` untuk opt-out). Pemulihan PostgreSQL yang terputus dapat memerlukan intervensi manual. Restore MySQL/MariaDB memakai safety snapshot wajib yang dipin dan journal pemulihan. |
-| T8 | Disk penuh saat save/restore → DB target korup | Cek ruang bebas (fs4) sebelum operasi; tolak bila < 100 MB atau < 2× ukuran snapshot. |
+| T8 | Disk penuh saat save/restore → DB target korup | SQLite save dan MySQL restore mengecek ruang lokal. Ini tidak mengukur disk server. Kegagalan dump safety membatalkan restore sebelum cleanup; kegagalan setelah cleanup mempertahankan journal dan snapshot pemulihan. Lihat TESTING.md. |
 | T9 | Filename/path injection lewat `tag` | Nama file = `<id>.zst` (id dibuat internal, hex); tag divalidasi `[A-Za-z0-9._-]`, maks 64 char, disimpan di metadata. |
 | T10 | SQL/shell injection dari input agent | Spawn **tanpa shell** (argv murni); identifier di-quote ketat (PG `"` / MySQL backtick); id/tag divalidasi. |
 | T11 | Kebocoran kredensial lewat log/error/metadata/MCP output | Password di-strip dari semua output; koneksi ditampilkan sebagai `postgres://***@127.0.0.1:5432/myapp_dev`. Tidak ada credential di file apa pun di `.dbsnap/`. |
-| T12 | Decompression bomb (`.zst` jahat di `tmp/`) | Cap byte hasil decompress = `original_bytes` di metadata +10%; melebihi → abort sebelum sentuh DB. |
+| T12 | Decompression bomb (`.zst` jahat di `tmp/`) | Ukuran hasil decompress harus tepat `original_bytes`; pembacaan dibatasi pada ukuran itu +1 untuk mendeteksi kelebihan. |
 | T13 | Prune menghapus file yang bukan miliknya | Prune **hanya** menghapus path yang tercatat di metadata (bukan glob `*.zst`); orphan dilaporkan `dbsnap status`, tidak pernah dihapus diam-diam. |
 | T14 | `.dbsnap/` ter-commit ke Git orang lain | `init` menambahkan `.dbsnap/` ke `.gitignore` + peringatan bila terdeteksi di index Git. |
 | T15 | Agent spam restore berkali-kali lewat MCP | Tool MCP berparameter minimal (id/tag saja); lock T5 membuatnya serial; tiap restore butuh verifikasi T3 — dampak spam = CPU, bukan kerusakan data. |
@@ -241,7 +247,7 @@ DB kecil–menengah (10–200 MB — mayoritas kasus dev) sudah instan di mode f
 | Koneksi PG terputus saat clone | Operasi dibatalkan; database sumber tidak pernah diubah (clone hanya CREATE). Sisa `__dbsnap_*` gagal di-drop otomatis. |
 | mysqldump gagal karena mismatch flag flavor | Retry otomatis dengan flag-set fallback (§2.3); error asli tetap ditampilkan bila dua-duanya gagal. |
 | Replay dump MySQL gagal di tengah | Target dapat berubah sebagian; safety snapshot dipin dan journal mewajibkan pemulihan snapshot itu sebelum restore lain. |
-| Proses dibunuh (SIGKILL) kapan pun | Semua mutasi bertahap: lock melepas sendiri (flock), tmp dibereskan oleh operasi berikutnya, fencing PG dirawat healing (T6), metadata atomic (T4). |
+| Proses dibunuh (SIGKILL) | Lock OS terlepas; staging dapat tertinggal. PG healing menangani keadaan journal yang tidak ambigu. MySQL journal mengarahkan pemulihan safety snapshot; tidak menjamin rollback otomatis atau tahan power-loss. |
 | Server PG/MySQL versi lama | `probe()` membaca versi; fitur yang butuh versi tertentu dicegah dengan pesan, bukan error samar di tengah jalan. |
 
 **Kontrak pengujian stabilitas (CI):**
@@ -288,7 +294,12 @@ opt-level = 3
 | **v0.2.0** | PostgreSQL: method clone + dump, fencing & healing, `dbsnap_status`, service container CI | 3–4 hari |
 | **v0.2.1** | Hardening: failpoint tests, chaos-lite, feedback lapangan | 1 hari |
 | **v0.3.0** | MySQL/MariaDB: flavor detection, curated flags + fallback retry, charset preservation | 3–4 hari |
-| **v0.4.0+** | `dbsnap export/import` portabel antar mesin, diff, remote storage | backlog |
+| **v0.4.0+** | `dbsnap export/import`, diff PostgreSQL dump, perbandingan isi baris, remote storage | backlog |
+
+Diff saat ini: SQLite schema/count, PostgreSQL clone table/view/count, dan
+MySQL/MariaDB table/count dengan pembacaan dump offline. Definisi serta batasan
+tepatnya ada di README. Matriks pengujian aktual dan perintah reproduksi ada di
+[TESTING.md](TESTING.md); status risiko tersisa ada di [AUDIT-STATUS.md](AUDIT-STATUS.md).
 
 ## 9. Prasyarat Pengguna per Engine (untuk README)
 

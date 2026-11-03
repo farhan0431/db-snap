@@ -95,7 +95,7 @@ database is protected.
 
 ```bash
 dbsnap save "before-migration"   # snapshot before risky changes
-dbsnap rollback                  # instant undo to the newest snapshot
+dbsnap rollback                  # restore the newest snapshot
 dbsnap restore "before-migration"
 dbsnap list
 dbsnap prune --keep 5

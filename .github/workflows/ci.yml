@@ -27,6 +27,11 @@ jobs:
         run: cargo test
       - name: Test npm launcher
         run: node npm/test/launcher.test.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: SQLite CLI and MCP end-to-end
+        run: python scripts/test-cli-mcp.py --engine sqlite --binary target/debug/dbsnap${{ runner.os == 'Windows' && '.exe' || '' }}
 
   test-postgres:
     runs-on: ubuntu-latest
@@ -59,6 +64,10 @@ jobs:
           DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@localhost:5433/app_admin
       - name: PostgreSQL E2E cleanup regression
         run: bash scripts/test-e2e-pg.sh
+      - name: PostgreSQL CLI and MCP end-to-end
+        run: python scripts/test-cli-mcp.py --engine postgres --binary target/debug/dbsnap
+        env:
+          DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@127.0.0.1:5433/app_admin
       - name: PostgreSQL E2E smoke test
         run: |
           cargo build
@@ -93,6 +102,10 @@ jobs:
         run: cargo test
         env:
           DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/app_admin
+      - name: MySQL CLI, MCP and real dump disk-full regression
+        run: python scripts/test-cli-mcp.py --engine mysql --binary target/debug/dbsnap --disk-full
+        env:
+          DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/app_admin
 
   test-mariadb:
     runs-on: ubuntu-latest
@@ -117,6 +130,52 @@ jobs:
         run: cargo test
         env:
           DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/app_admin
+      - name: MariaDB CLI, MCP and real dump disk-full regression
+        run: python scripts/test-cli-mcp.py --engine mysql --binary target/debug/dbsnap --disk-full
+        env:
+          DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/app_admin
+
+  test-storage-full:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mysql:8.0
+            scheme: mysql
+            admin: mysqladmin
+          - image: mariadb:11
+            scheme: mariadb
+            admin: mariadb-admin
+    services:
+      bounded:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: '1'
+        ports:
+          - 3339:3306
+        command: --innodb-file-per-table=OFF --innodb-data-file-path=ibdata1:12M:autoextend:max:128M --event-scheduler=ON
+        options: >-
+          --health-cmd "${{ matrix.admin }} ping --protocol=TCP -h127.0.0.1 -uroot --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install clients
+        run: sudo apt-get update && sudo apt-get install -y default-mysql-client
+      - run: cargo build
+      - name: Real bounded InnoDB storage-full replay and recovery
+        run: python scripts/test-mysql-storage-full.py --binary target/debug/dbsnap
+        env:
+          DBSNAP_TEST_MYSQL_STORAGE_URL: ${{ matrix.scheme }}://root@127.0.0.1:3339/mysql
+      - name: Connected client and enabled event refusal
+        run: cargo test mysql_restore_refuses_active_clients_and_events -- --nocapture
+        env:
+          DBSNAP_TEST_MYSQL_URL: ${{ matrix.scheme }}://root@127.0.0.1:3339/mysql
 
   security:
     runs-on: ubuntu-latest

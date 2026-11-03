@@ -478,7 +478,13 @@ pub fn diff_with(ctx: &Ctx, from: &str, to: &str) -> Result<String> {
         DbTarget::Sqlite(path) if left.engine == "sqlite" && right.engine == "sqlite" => {
             engine::sqlite::SqliteEngine::new(path.clone()).diff(&ctx.store, &left, &right)
         }
-        _ => bail!("snapshot diff currently supports SQLite snapshots only"),
+        DbTarget::Postgres(pg) if left.engine == "postgres" && right.engine == "postgres" => {
+            engine::postgres::PostgresEngine::new(pg.clone()).diff(&left, &right)
+        }
+        DbTarget::Mysql(target) if left.engine == "mysql" && right.engine == "mysql" => {
+            engine::mysql::MysqlEngine::new(target.clone()).diff(&ctx.store, &left, &right)
+        }
+        _ => bail!("snapshot diff is not supported for these snapshot types"),
     }
 }
 

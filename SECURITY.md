@@ -20,14 +20,13 @@ They do not constitute a security audit or a production backup guarantee:
    CLI also accepts private-network targets; other hosts require `--allow-remote`.
    Loopback does not prove a target is non-production or prevent tunneling.
 2. **Project binding (T2).** `.dbsnap/config.json` fingerprints the bound
-   database; snapshots cannot be restored into a different database without
-   an explicit `--force`.
+   database; a catalog from another database is refused even with `--force`.
 3. **Verify before restore (T3).** SQLite manifests/chunks and dump artifacts
    are checked before restore. PostgreSQL clone fingerprints do not verify
    database contents.
 4. **Safety snapshots (T7).** Restore creates a safety snapshot by default,
-   unless explicitly disabled on the CLI. A successful snapshot does not make
-   PostgreSQL or MySQL restore atomic.
+   unless explicitly disabled for SQLite/PostgreSQL. Fresh MySQL/MariaDB restores
+   require a pinned safety snapshot. A snapshot does not make restore atomic.
 5. **Prune boundaries (T13).** Prune uses recorded artifacts and validates
    artifact paths; server-side clone drops require the `__dbsnap_` prefix.
    Filesystem path checks are not an OS-level sandbox against concurrent tampering.
@@ -51,6 +50,10 @@ They do not constitute a security audit or a production backup guarantee:
   and scheduled events. A mandatory pinned safety snapshot and journal support
   manual recovery. Dumps are trusted executable SQL, not sandboxed input.
   See docs/MYSQL-RESTORE.md; crash/power-loss durability is not proven.
+- MySQL checks visible target connections and enabled events before cleanup,
+  but these checks do not fence future connections. Administrators must stop
+  writers/events. Local free-space checks do not measure database-server disk.
+  Tested ENOSPC and process-exit boundaries are listed in docs/TESTING.md.
 - PostgreSQL clone restore is not atomic; the source snapshot is preserved.
   A recovery journal handles some interruptions, but ambiguous states require
   manual recovery. Dump replay occurs in staging before the same cutover.

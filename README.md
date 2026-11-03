@@ -4,15 +4,13 @@
 
 **"git commit / git checkout" for your local database.**
 
-Physical, DDL-proof snapshots in milliseconds — with a built-in
-**MCP server** so Cursor, Windsurf, and Claude Code can protect and heal
-your database themselves.
+Snapshots for local development, including schema and data, with a built-in
+**MCP server** for Cursor, Windsurf, Claude Code, and other MCP clients.
 
 [![CI](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml/badge.svg)](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/dbsnap.svg)](https://crates.io/crates/dbsnap)
 [![npm](https://img.shields.io/npm/v/%40farhan0431%2Fdb-snap.svg)](https://www.npmjs.com/package/@farhan0431/db-snap)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)
 
 **SQLite** (delta snapshots, ms) · **PostgreSQL** (server-side clones, s) · **MySQL/MariaDB** (consistent dumps, s)
 
@@ -21,8 +19,8 @@ your database themselves.
 </div>
 
 ```bash
-dbsnap save "before-auth-migration"   # commit point — instant
-dbsnap rollback                       # oops → back to safety, instantly
+dbsnap save "before-auth-migration"   # keep a restore point
+dbsnap rollback                      # restore the newest snapshot
 ```
 
 ## Install as an MCP server — 30 seconds
@@ -56,6 +54,11 @@ No global install? Use `"command": "npx", "args": ["-y", "@farhan0431/db-snap", 
 Copy-paste configs for every client, verification steps, and troubleshooting:
 **[INSTALL.md](INSTALL.md)** · agent-readable summary: [llms.txt](llms.txt)
 
+Repository verification: [testing guide](docs/TESTING.md),
+[audit status](docs/AUDIT-STATUS.md), and [MySQL recovery](docs/MYSQL-RESTORE.md).
+The testing guide distinguishes live CLI/MCP coverage, injected failures, and
+remaining limitations; passing tests are not a production-backup certification.
+
 ## Why
 
 Vibe coding means telling an AI agent things like *"refactor auth, run the
@@ -63,8 +66,8 @@ Prisma migration, reshuffle the seed data"*. Three things go wrong constantly:
 
 1. **DDL is not undoable by queries.** When the agent runs `DROP COLUMN` or a
    botched migration, query-level undo cannot bring back the dropped column
-   *and* its data. `dbsnap` snapshots the physical database file — everything
-   comes back, schema and data, bit-for-bit.
+   *and* its data. `dbsnap` snapshots schema and data using SQLite page backups,
+   PostgreSQL clones or dumps, and MySQL/MariaDB logical dumps.
 2. **Copying SQLite while the dev server runs corrupts it.** The newest writes
    live in the `-wal` file and the server holds the file open. `dbsnap` uses
    SQLite's [Online Backup API](https://www.sqlite.org/backup.html) (bundled
@@ -116,12 +119,21 @@ dbsnap prune --keep 5           # keep only the 5 newest
 dbsnap status                   # binding, engine info, disk usage
 dbsnap list --json              # machine-readable snapshot catalog
 dbsnap status --json            # machine-readable database status
-dbsnap diff before after        # SQLite schema and table row counts
+dbsnap diff before after        # compare supported snapshots
 dbsnap pin "golden seed"        # protect a snapshot from pruning
 dbsnap unpin "golden seed"      # remove prune protection
 ```
 
-`diff` currently supports SQLite snapshots; it does not compare individual row contents.
+`diff` supports SQLite snapshots, PostgreSQL server-side clone snapshots, and
+standard MySQL/MariaDB dump snapshots created by dbsnap.
+For SQLite it compares schema objects and table row counts. For PostgreSQL it
+compares table/view definitions and table row counts; indexes, constraints,
+routines, and triggers are not compared. Individual row contents are not
+compared on any engine. MySQL/MariaDB diff reads verified dumps offline and
+compares table definitions (including inline keys) and row counts. It does not
+execute SQL or compare views, routines, triggers or events. Unsupported INSERT
+formats produce an error; this is not a general SQL dump parser. PostgreSQL dump
+snapshots are not yet supported by `diff`.
 When a safety snapshot is enabled, restore stops if it cannot be created.
 PostgreSQL dump save and restore require `pg_dump` and `pg_restore` respectively
 to have the same major version as the target server. A mismatch is rejected
@@ -170,7 +182,7 @@ elicitation. Clients without elicitation support cannot invoke these operations.
 | `dbsnap_create_snapshot` | **MUST be called before** any migration, DDL, or bulk data change. |
 | `dbsnap_restore_snapshot` | Call **immediately** when a migration fails or data looks wrong. Current state is kept as a safety snapshot first. |
 | `dbsnap_list_snapshots` | Show available restore points. |
-| `dbsnap_diff` | Compare two SQLite snapshots' schema and row counts. |
+| `dbsnap_diff` | Compare schema and row counts for SQLite, PostgreSQL clones, or MySQL/MariaDB dumps. |
 | `dbsnap_prune` | Remove older snapshots, retaining at least one, when requested by the user. |
 | `dbsnap_status` | Show which database is protected before touching anything. |
 
@@ -184,7 +196,7 @@ workflow: *snapshot before migrations, restore on failure*. Copy it to
 apply it across every project. The canonical copy lives in
 [`skill/dbsnap/SKILL.md`](skill/dbsnap/SKILL.md).
 
-## Safety guarantees (the "don't wreck my project" list)
+## Safeguards and limitations
 
 - **Host guard.** MCP accepts SQLite and loopback database hosts only. The CLI
   also allows private-network addresses by default; other addresses require
@@ -195,7 +207,7 @@ apply it across every project. The canonical copy lives in
   require verified TLS on loopback as well.
 - **Project binding.** `.dbsnap/config.json` fingerprints your database;
   restoring a snapshot into a *different* project's database is refused
-  (`--force` to override deliberately).
+  even with `--force` when the catalog belongs to another database.
 - **Verify before restore.** SQLite chunks and dump artifacts are checked
   before restore. A PostgreSQL server-side clone is checked for existence;
   its metadata fingerprint is not a checksum of the database contents.
@@ -203,11 +215,13 @@ apply it across every project. The canonical copy lives in
   and preserves the old target during cutover. Ambiguous recovery states require
   manual inspection. Dump replay is first tested in a staging database and then
   uses the same cutover; an interrupted cutover may require manual recovery.
-- **Safety snapshots** are created by default before restore; the CLI can
-  explicitly disable them. Some interrupted operations require manual recovery.
+- **Safety snapshots** are created by default before restore. SQLite and
+  PostgreSQL allow explicit opt-out; fresh MySQL/MariaDB restores require a
+  pinned safety snapshot. Some interrupted operations require manual recovery.
 - **Cross-process locking** serializes catalog operations. Metadata is written
   by rename, but power-loss durability is not guaranteed.
-- **No credentials stored.** Nothing in `.dbsnap/` ever contains your password.
+- **Connection credentials** are omitted from configuration/catalog files and
+  masked in command output. Snapshot contents may contain sensitive application data.
 
 ## How it works
 
@@ -276,7 +290,8 @@ machine:
 - [x] **v0.2.0** — PostgreSQL (server-side template cloning + `pg_dump`, fencing & healing)
 - [x] **v0.3.0** — MySQL/MariaDB (consistent dumps, flavor detection, charset preservation)
 - [ ] `dbsnap export/import` — portable snapshot archives across machines
-- [ ] snapshot diffing (`dbsnap diff`)
+- [x] snapshot diffing for SQLite, PostgreSQL clones and MySQL/MariaDB table dumps
+- [ ] extend snapshot diffing to PostgreSQL dump archives
 
 ## Repository layout
 
@@ -289,7 +304,7 @@ db-snap/
 │   ├── ops.rs         # shared command layer (CLI & MCP call the same code)
 │   ├── config.rs      # DATABASE_URL resolution, fingerprinting, host guard
 │   └── util.rs        # redaction, ids, formatting
-├── tests/             # 29 tests incl. live PostgreSQL/MySQL roundtrips
+├── tests/             # integration and fault-injection tests
 ├── npm/               # single npm package with bundled platform binaries
 ├── scripts/           # e2e demos: live-writer, PostgreSQL, MySQL
 ├── skill/dbsnap/      # agent skill installed by `dbsnap init`

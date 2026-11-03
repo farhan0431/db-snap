@@ -31,8 +31,62 @@ pub struct MysqlEngine {
 }
 
 impl MysqlEngine {
+    /// Deterministic I/O/process fault boundaries, exercised in child processes.
+    fn fault_boundary(name: &str) -> Result<()> {
+        let selected = std::env::var("DBSNAP_FAILPOINT").unwrap_or_default();
+        if selected == format!("mysql_exit_{name}") {
+            std::process::exit(86);
+        }
+        if selected == format!("mysql_disk_full_{name}") {
+            #[cfg(windows)]
+            let code = 112;
+            #[cfg(not(windows))]
+            let code = 28;
+            return Err(std::io::Error::from_raw_os_error(code))
+                .context("injected disk-full I/O failure");
+        }
+        Ok(())
+    }
     pub fn new(target: ServerTarget) -> Self {
         Self { target }
+    }
+
+    pub fn diff(
+        &self,
+        store: &Storage,
+        left: &SnapshotRecord,
+        right: &SnapshotRecord,
+    ) -> Result<String> {
+        fn stage(
+            store: &Storage,
+            record: &SnapshotRecord,
+            side: &str,
+        ) -> Result<(TemporaryFile, std::path::PathBuf)> {
+            if record.engine != "mysql"
+                || record.method != "mysql-dump"
+                || !matches!(record.location, Location::File { .. })
+            {
+                bail!("MySQL diff requires mysql-dump file snapshots");
+            }
+            let path = store.tmp_dir().join(format!(
+                "mysql-diff-{side}-{}.sql",
+                util::new_id(&store.load_metadata()?.ids())
+            ));
+            let guard = TemporaryFile::create(path.clone())?;
+            compress::decompress_verified(
+                &store.snapshot_path(record)?,
+                &path,
+                &record.blake3,
+                record.original_bytes,
+            )?;
+            Ok((guard, path))
+        }
+        let (_left_guard, left_path) = stage(store, left, "left")?;
+        let (_right_guard, right_path) = stage(store, right, "right")?;
+        super::mysql_diff::compare(
+            BufReader::new(std::fs::File::open(left_path)?),
+            BufReader::new(std::fs::File::open(right_path)?),
+        )
     }
 
     /// Client binaries talk TCP; the literal host `localhost` means a unix
@@ -205,7 +259,7 @@ impl MysqlEngine {
         let zst_path = store.snapshots_dir().join(format!("{id}.sql.zst"));
         let _raw_guard = TemporaryFile::create(raw_tmp.clone())?;
 
-        let mut last_err = String::new();
+        let mut errors = Vec::new();
         for flags in self.dump_flag_sets(flavor) {
             std::fs::OpenOptions::new()
                 .write(true)
@@ -254,18 +308,19 @@ impl MysqlEngine {
                     });
                 }
                 Ok(o) => {
-                    last_err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    errors.push(String::from_utf8_lossy(&o.stderr).trim().to_string());
                 }
                 Err(e) => {
-                    last_err = format!("{e:#}");
+                    errors.push(format!("{e:#}"));
                 }
             }
         }
         bail!(
-            "{}dump failed with every known flag set for {} {}:\n{last_err}",
+            "{} failed with every known flag set for {} {}:\n{}",
             dump_bin,
             flavor.name(),
-            version
+            version,
+            errors.join("\n")
         )
     }
 
@@ -276,6 +331,7 @@ impl MysqlEngine {
         safety_tag: Option<&str>,
     ) -> Result<RestoreOutcome> {
         let mut meta = store.load_metadata()?;
+        Self::fault_boundary("before_stage")?;
         if store.free_bytes()?
             < record
                 .original_bytes
@@ -319,20 +375,51 @@ impl MysqlEngine {
         let bin = self.pick_bin(Flavor::Mysql, false)?;
         let cleanup = self.cleanup_sql(&bin)?;
         let safety = if pending.is_none() {
+            Self::fault_boundary("before_safety")?;
             let mut saved = self
                 .save_dump(store, safety_tag.unwrap(), &meta.ids())?
                 .record;
-            saved.pinned = true; // Never prune the recovery copy after failure.
+            // Never prune the recovery copy after failure. Persist it before
+            // making it discoverable in metadata. Directory durability still
+            // depends on the filesystem.
+            saved.pinned = true;
             meta.snapshots.push(saved.clone());
-            store.write_metadata(&meta)?;
+            let persisted = (|| -> Result<()> {
+                Self::fault_boundary("before_safety_sync")?;
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(store.snapshot_path(&saved)?)?
+                    .sync_all()?;
+                Self::fault_boundary("before_safety_metadata")?;
+                store.write_metadata(&meta)?;
+                Self::fault_boundary("after_safety_metadata")
+            })();
+            if let Err(error) = persisted {
+                // This artifact was just created by save_dump. Remove it only
+                // when it is confirmed to be uncatalogued.
+                // A rename may have committed metadata even when the later
+                // directory sync reports an error. Preserve the artifact if
+                // catalog state is committed or cannot be determined.
+                if store
+                    .load_metadata()
+                    .is_ok_and(|catalog| !catalog.snapshots.iter().any(|r| r.id == saved.id))
+                {
+                    std::fs::remove_file(store.snapshot_path(&saved)?).ok();
+                }
+                return Err(error);
+            }
             // create_new prevents overwriting a concurrent/replaced journal.
             use std::io::Write;
+            Self::fault_boundary("before_journal")?;
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&journal)?;
             file.write_all(&serde_json::to_vec(&saved.id)?)?;
             file.sync_all()?;
+            #[cfg(unix)]
+            std::fs::File::open(&store.root)?.sync_all()?;
             Some(saved)
         } else {
             None
@@ -342,6 +429,17 @@ impl MysqlEngine {
             .or_else(|| safety.as_ref().map(|r| r.id.as_str()))
             .unwrap();
         let result = (|| -> Result<()> {
+            // Both a new restore and recovery require a catalogued, intact
+            // recovery artifact before the next destructive operation.
+            let recovery_record = store.load_metadata()?.find(Some(recovery))?;
+            if !recovery_record.pinned
+                || compress::hash_file(&store.snapshot_path(&recovery_record)?)?
+                    != recovery_record.blake3
+            {
+                bail!("recovery snapshot is not pinned or failed integrity verification");
+            }
+            Self::fault_boundary("after_journal")?;
+            self.require_quiet_target(&bin)?;
             self.sql(&bin, &cleanup)?;
             if std::env::var("DBSNAP_FAILPOINT").as_deref() == Ok("mysql_after_cleanup") {
                 bail!("injected failure after MySQL cleanup");
@@ -349,6 +447,7 @@ impl MysqlEngine {
             if std::env::var("DBSNAP_FAILPOINT").as_deref() == Ok("mysql_exit_after_cleanup") {
                 std::process::exit(86);
             }
+            Self::fault_boundary("before_replay")?;
             let output = Command::new(&bin)
                 .arg("--no-defaults")
                 .args(self.base_args())
@@ -363,12 +462,15 @@ impl MysqlEngine {
                     String::from_utf8_lossy(&output.stderr).trim()
                 );
             }
+            Self::fault_boundary("after_replay")?;
             Ok(())
         })();
         if let Err(error) = result {
             bail!("{error:#}\nTarget may be partially restored. Safety snapshot is pinned; recover with: dbsnap restore {recovery}");
         }
         std::fs::remove_file(journal)?;
+        #[cfg(unix)]
+        std::fs::File::open(&store.root)?.sync_all()?;
         // Recovery snapshots stay pinned deliberately, including after success.
         Ok(RestoreOutcome { safety })
     }
@@ -402,6 +504,7 @@ impl MysqlEngine {
     /// itself (and its grants/default charset) is never dropped.
     fn cleanup_sql(&self, bin: &str) -> Result<String> {
         let db = Self::quote_lit(&self.target.database);
+        self.require_quiet_target(bin)?;
         let exists = self.sql(
             bin,
             &format!("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME={db}"),
@@ -443,6 +546,24 @@ impl MysqlEngine {
             ));
         }
         Ok(sql)
+    }
+
+    fn require_quiet_target(&self, bin: &str) -> Result<()> {
+        let db = Self::quote_lit(&self.target.database);
+        let sessions = self.sql(bin, &format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB={db} AND ID<>CONNECTION_ID()"))?;
+        if sessions.trim() != "0" {
+            bail!(
+                "target has connected clients; stop application connections before MySQL restore"
+            );
+        }
+        let scheduler = self.sql(bin, "SELECT @@GLOBAL.event_scheduler")?;
+        if scheduler.trim().eq_ignore_ascii_case("ON") {
+            let events = self.sql(bin, &format!("SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA={db} AND STATUS='ENABLED'"))?;
+            if events.trim() != "0" {
+                bail!("target has enabled scheduled events; stop the event scheduler before MySQL restore");
+            }
+        }
+        Ok(())
     }
 
     fn quote_lit(s: &str) -> String {

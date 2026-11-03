@@ -1,84 +1,111 @@
 ---
 name: dbsnap
-description: Database snapshots for local development. SQLite and PostgreSQL support restore; MySQL/MariaDB restore requires a safety snapshot and stopped writers. Use before migrations or bulk changes, and verify the engine supports restoration. Covers the dbsnap CLI and MCP tools.
+description: Save, inspect, compare, and restore development database snapshots with the dbsnap CLI or MCP tools. Use before migrations, DDL, seeds, or bulk edits, and when recovering a failed database change. Supports SQLite, PostgreSQL, and MySQL/MariaDB.
 ---
 
-# dbsnap — database time-machine for this project
+# dbsnap — development database checkpoints
 
-dbsnap creates snapshots of local development databases. SQLite and PostgreSQL
-support restore; MySQL/MariaDB uses logical dumps and non-atomic restore to the original database. Stop writers and scheduled events first. Keep the mandatory pinned safety snapshot; if interrupted, recover the ID in `.dbsnap/mysql-restore.json` before another restore.
-Engines: SQLite (delta snapshots, milliseconds), PostgreSQL (server-side
-template clones, ~1 s with a brief connection blackout), and MySQL/MariaDB
-(consistent logical dumps, seconds on big databases).
+Use an installed `dbsnap` binary or tools advertised by the current MCP session.
+If installation is needed, use `npm i -g @farhan0431/db-snap`; tool users do not
+need to build the repository. Run commands in the intended project directory.
+Never assume that a loopback database is disposable.
 
-## Golden rules
+## Before changing data
 
-1. **Snapshot BEFORE any risky change.** Before running migrations, DDL
-   (`ALTER`/`DROP`), seed/fresh scripts, or bulk updates, create a snapshot:
-   `dbsnap_create_snapshot` (MCP) or `dbsnap save "<what-you-are-about-to-do>"`
-   (CLI). Pick a tag that names the coming change, e.g. `before-auth-migration`.
-2. **Ask before restoring when something breaks.** If a migration fails, the
-   schema looks wrong, or data regressed: `dbsnap_restore_snapshot`
-   (omitting the argument restores the most recent snapshot) or
-   `dbsnap rollback`. The pre-restore state is automatically kept as a safety
-   snapshot, so restoring is never a dead end.
-3. **Check `dbsnap_status` first** if unsure which database you are touching.
+1. Check `dbsnap_status` or `dbsnap status` to establish the target and engine.
+   Resolve binding mismatches first. `--force` cannot reuse another database's
+   catalog; do not edit fingerprints to bypass this check.
+2. Save before migrations, DDL, seed/reset scripts, or bulk changes. Use a
+   descriptive tag such as `before-users-migration`. If save fails, stop the
+   risky operation and fix the snapshot failure first.
+3. Keep the returned snapshot ID. After the change, verify the expected schema
+   and application data. Snapshot diff adds schema/count evidence, not proof
+   that every row is correct.
 
-## MCP tools (this session)
+## Tools and commands
 
-| Tool | Arguments | Use |
-| :--- | :--- | :--- |
-| `dbsnap_status` | — | Show bound database, engine, snapshot count, disk usage. |
-| `dbsnap_prune` | `keep` (positive integer) | Delete older snapshots only when the user requests cleanup. |
-| `dbsnap_create_snapshot` | `tag` (required, `[A-Za-z0-9._-]`) | Save a snapshot. Call before migrations/DDL/bulk changes. |
-| `dbsnap_restore_snapshot` | `tag_or_id` (optional; omit = latest) | Restore. Immediately after failure; also to undo an experiment. |
-| `dbsnap_list_snapshots` | — | List restore points (id, tag, time, size). |
+| MCP tool | Arguments | CLI equivalent |
+| --- | --- | --- |
+| `dbsnap_status` | none | `dbsnap status` |
+| `dbsnap_create_snapshot` | optional `tag` | `dbsnap save "before-users-migration"` |
+| `dbsnap_list_snapshots` | none | `dbsnap list` |
+| `dbsnap_diff` | `from`, `to` (IDs or tags) | `dbsnap diff before after` |
+| `dbsnap_restore_snapshot` | optional `tag_or_id` | `dbsnap restore SNAPSHOT_ID` |
+| `dbsnap_prune` | positive integer `keep` | `dbsnap prune --keep 5` |
 
-CLI equivalents: `dbsnap save/list/restore/rollback/status/prune` (run in the
-project root; `--db <path>` overrides the bound database).
+Tags allow letters, digits, spaces, `.`, `_`, and `-`, up to 64 characters.
+Duplicate tags can be ambiguous; list snapshots and use an unambiguous ID.
+CLI also supports `init`, `rollback`, `pin`, `unpin`, `list --json`, and
+`status --json`. Pinning protects a snapshot from prune, including `prune --all`.
+Do not prune or unpin recovery copies as an incidental cleanup step.
 
-## How the database is resolved
+## Restore and authorization
 
-`--db` flag → `DATABASE_URL` from `.env` → auto-detect (`prisma/dev.db`,
-`dev.db`, `*.sqlite`, …; PostgreSQL needs `DATABASE_URL` or `--db`, e.g.
-`postgres://user@localhost:5432/app_dev`). The `.dbsnap/config.json`
-fingerprint binds the project; operating on a **different** database is
-refused (deliberate override: `--force`, or re-run `dbsnap init`). The MCP
-server allows SQLite and loopback hosts only; a local database may still contain important data.
-MCP restore and prune require the server to be started with `--allow-destructive` and an explicit user confirmation for each operation via MCP elicitation. Clients without elicitation support cannot run these operations.
+Restore replaces current data. Establish the intended target and snapshot and
+respect the user's existing authorization; clarify only when that scope is
+missing or unclear. Prefer the recorded ID for the operation being undone.
+Omitting the selector, or using `rollback`, chooses the newest snapshot, which
+may be an automatic safety snapshot from an earlier restore.
 
-## Safety model (what you may rely on)
+MCP restore/prune require `dbsnap mcp --allow-destructive` and per-call approval
+through a client supporting MCP elicitation. Existing conversational permission
+does not bypass this protocol check. If unavailable, explain the limitation and
+use the CLI only within the user's authorization. Do not silently enable
+destructive access in the client's configuration.
 
-- SQLite chunks and dump files are verified before touching the
-  live database; a corrupt snapshot is refused, never applied.
-- Every restore first saves the current state as an `auto-before-restore-*`
-  snapshot (kept: last 3). Quoted in the output as a one-command way back.
-- Snapshots live in `.dbsnap/` (git-ignored); PostgreSQL clones live
-  server-side as `__dbsnap_*` databases. Identical consecutive snapshots are
-  linked after contents are verified; a new snapshot still reads the database.
-- PostgreSQL note: a clone save/restore blocks NEW connections to the target
-  database for about a second; the dev server reconnects on its own.
+Keep safety snapshots enabled. A successful safety save does not guarantee
+atomic restoration. If restore fails, report the error and recovery ID; resolve
+its cause before retrying. Do not repeatedly restore against a partial target
+or delete journals, catalog entries, or snapshot files to clear the error.
 
-## Troubleshooting
+## Engine-specific behavior
 
-- *"this project is bound to … but the target database is …"* → wrong
-  directory or wrong `--db`. Confirm with `dbsnap_status`; only re-bind
-  (`dbsnap init`) if the user asks.
-- *"no snapshot matches …"* → run `dbsnap_list_snapshots` and use an exact id
-  prefix or tag.
-- *"database is locked"* → the dev server is mid-write; wait a moment and
-  retry once. If it persists, ask the user to stop the server.
-- Snapshot file missing → the catalog is out of sync; report to the user,
-  do not delete `.dbsnap/` yourself.
+| Engine | Save/restore behavior | Diff scope |
+| --- | --- | --- |
+| SQLite | Existing file; bundled Online Backup API and verified delta chunks | Tables, indexes, views, triggers, and table row counts |
+| PostgreSQL | Default server-side clone; CLI `save --method dump` uses matching-major clients | Clone tables/views and table row counts; dump diff unsupported |
+| MySQL/MariaDB | Logical dump; InnoDB for consistent transactional snapshots; restore to original target | Standard dbsnap dump table definitions and row counts, read offline |
 
-## Example workflows
+Diff never compares individual row contents. PostgreSQL diff excludes indexes,
+constraints, routines and triggers; MySQL diff excludes views, routines, triggers
+and events. Equal counts do not imply equal data. Report unsupported formats or
+snapshot types rather than replaying dumps into the live database to inspect them.
 
-**Before a migration:**
-`dbsnap_create_snapshot {tag: "before-users-migration"}` → run migration →
-verify → done (snapshot stays as a restore point).
+PostgreSQL cloning briefly fences and disconnects target connections; duration
+depends on data and server load. Clones disappear with the server's data volume.
+Clone fingerprints are metadata fingerprints, not content checksums. Interrupted
+cutover can require manual inspection of `postgres-restore.json`; do not drop
+preserved databases or consume catalogued clones manually.
 
-**After a failed migration:**
-`dbsnap_restore_snapshot {}` (latest) → investigate → retry the migration.
+### MySQL/MariaDB recovery
 
-**Exploratory data surgery:** snapshot `before-cleanup` → run risky SQL →
-unsatisfied? `dbsnap_restore_snapshot {tag_or_id: "before-cleanup"}`.
+- Stop application connections, writers and scheduled events before restore or
+  recovery. Visible connections/enabled events cause refusal, but preflight does
+  not fence new connections. Coordinate server-wide scheduler changes or killing
+  connections within the user's authorization; do not change them silently.
+- Restore is in-place and non-atomic. It preserves the database itself, replaces
+  its objects, and requires a pinned safety snapshot. Fresh restore rejects
+  `--no-safety-snapshot`. Dumps must be trusted; they are executable SQL.
+- If `.dbsnap/mysql-restore.json` exists, read its recovery ID and restore that
+  exact ID. Resolve disk, connection or privilege failures first. Other restore
+  IDs and unpinning are refused while recovery is pending. Recovery reuses the
+  existing pinned copy instead of saving the partially restored state.
+- A full server disk can also prevent recovery. Free space through an authorized
+  operation before retrying; do not delete the recovery artifact or journal.
+  A malformed journal or missing/corrupt recovery copy requires investigation.
+- Safety copies remain pinned after success. Review them before explicitly
+  unpinning; they are not part of automatic unpinned-snapshot retention.
+
+## Target resolution and storage
+
+Resolution is `--db` → process `DATABASE_URL` → project `.env` → SQLite discovery.
+Server databases need a URL. MCP accepts SQLite and loopback hosts only; the CLI
+also accepts private-network hosts by default. PostgreSQL non-loopback connections
+require verified TLS; use `DBSNAP_PG_TLS=verify-full` for loopback TLS and
+`DBSNAP_PG_CA_CERT` for an additional trusted PEM CA.
+
+`.dbsnap/` contains the catalog and file artifacts and is added to `.gitignore`.
+PostgreSQL clones reside on the server. Connection credentials are excluded from
+catalog/config output, but snapshots can contain sensitive application data.
+Do not commit or share them casually. Keep independent backups for valuable data;
+dbsnap does not provide disaster recovery or proven power-loss durability.
