@@ -10,6 +10,10 @@ Supports **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. The npm package
 bundles prebuilt binaries for Windows x64, macOS Intel and Apple Silicon, and
 Linux x64 (glibc and musl) and ARM64 (glibc).
 
+**MySQL/MariaDB restore is temporarily disabled for safety.** Saving snapshots
+remains available, but do not rely on dbsnap to restore them until safe restore
+support returns.
+
 ## Install
 
 Requires Node.js 16 or later.
@@ -70,8 +74,8 @@ and prune snapshots. It resolves the project from its working directory, so
 start it in the project you want to protect.
 
 Restore and prune are disabled by default in MCP. To enable them for a server
-session, start it with `dbsnap mcp --allow-destructive`. This is a session
-setting, not a per-operation approval prompt.
+session, start it with `dbsnap mcp --allow-destructive`. Each operation requires
+approval through an MCP client supporting elicitation; otherwise use the CLI.
 
 `dbsnap init` also writes `.agents/skills/dbsnap/SKILL.md` in the project.
 Whether that skill is loaded automatically depends on the AI client; the skill

@@ -8,9 +8,8 @@ use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
 /// MySQL has no physical hot-copy API — snapshots are consistent logical
-/// dumps (`mysqldump --single-transaction`, design §2.3). Restore is verify →
-/// capture charset → safety snapshot → drop + recreate → replay. Seconds,
-/// not milliseconds — documented honestly.
+/// dumps (`mysqldump --single-transaction`, design §2.3). Restore is disabled
+/// until it can satisfy the project's target and recovery safety rules.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Flavor {
@@ -263,126 +262,11 @@ impl MysqlEngine {
 
     fn restore_dump(
         &self,
-        store: &Storage,
-        record: &SnapshotRecord,
-        safety_tag: Option<&str>,
+        _store: &Storage,
+        _record: &SnapshotRecord,
+        _safety_tag: Option<&str>,
     ) -> Result<RestoreOutcome> {
-        let dump_zst = store.snapshot_path(record)?;
-        if !dump_zst.exists() {
-            bail!("dump file {} is missing on disk", dump_zst.display());
-        }
-
-        let exec_bin = self.pick_bin(Flavor::Mysql, false)?;
-        let (_flavor, _version) = self.detect_flavor(&exec_bin)?;
-
-        // 1. Verify integrity BEFORE touching the database (§4-T3).
-        let sql_tmp = store.tmp_dir().join(format!("restore-{}.sql", record.id));
-        compress::decompress_verified(&dump_zst, &sql_tmp, &record.blake3, record.original_bytes)?;
-
-        // 2. Capture charset/collation so the recreation matches (§2.3).
-        let db_lit = Self::quote_lit(&self.target.database);
-        let charset_row = self.sql(
-            &exec_bin,
-            &format!(
-                "SELECT default_character_set_name, default_collation_name \
-                 FROM information_schema.SCHEMATA WHERE schema_name = {db_lit};"
-            ),
-        );
-        let (charset, collation) = match charset_row {
-            Ok(row) => {
-                let mut it = row.trim().split('\t');
-                (
-                    it.next().unwrap_or("utf8mb4").trim().to_string(),
-                    it.next().unwrap_or("utf8mb4_general_ci").trim().to_string(),
-                )
-            }
-            Err(_) => ("utf8mb4".to_string(), "utf8mb4_general_ci".to_string()),
-        };
-
-        // 3. Safety snapshot of the current state, persisted immediately
-        //    (crash-safe, §4-T7) — same contract as the PostgreSQL engine.
-        let mut safety: Option<SnapshotRecord> = None;
-        if let Some(tag) = safety_tag {
-            let taken = store.load_metadata()?.ids();
-            match self.save_dump(store, tag, &taken) {
-                Ok(outcome) => {
-                    let mut meta = store.load_metadata()?;
-                    meta.snapshots.push(outcome.record.clone());
-                    store.write_metadata(&meta)?;
-                    safety = Some(outcome.record);
-                }
-                Err(e) => {
-                    std::fs::remove_file(&sql_tmp).ok();
-                    bail!("pre-restore safety snapshot failed; restore aborted: {e:#}");
-                }
-            }
-        }
-
-        // 4. Drop + recreate with the original charset/collation.
-        let db_ident = Self::quote_ident(&self.target.database);
-        if let Err(e) = self.sql(
-            &exec_bin,
-            &format!(
-                "DROP DATABASE IF EXISTS {db_ident}; CREATE DATABASE {db_ident} CHARACTER SET {} COLLATE {};",
-                Self::quote_lit(&charset),
-                Self::quote_lit(&collation)
-            ),
-        ) {
-            let hint = Self::safety_hint(&safety);
-            bail!("could not recreate database: {e:#}{hint}");
-        }
-
-        // 5. Replay the dump — no --force: stop on the first error (§2.3).
-        let replay = Command::new(&exec_bin)
-            .args(self.base_args())
-            .arg("--default-character-set=utf8mb4")
-            .env("MYSQL_PWD", self.target.password.as_deref().unwrap_or(""))
-            .stdin(Stdio::from(std::fs::File::open(&sql_tmp)?))
-            .output();
-        std::fs::remove_file(&sql_tmp).ok();
-        match replay {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                let hint = Self::safety_hint(&safety);
-                bail!(
-                    "replay failed; the target database may be partially restored: {}{hint}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-            }
-            Err(e) => {
-                let hint = Self::safety_hint(&safety);
-                bail!("could not run {exec_bin}; the target database may be empty or partially restored: {e}{hint}");
-            }
-        }
-        let verified = self
-            .sql(
-                &exec_bin,
-                &format!(
-                    "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE schema_name = {};",
-                    Self::quote_lit(&self.target.database)
-                ),
-            )
-            .context("restore applied but MySQL database verification failed")?;
-        if verified.trim() != "1" {
-            bail!("restore applied but the target MySQL database was not found");
-        }
-        Ok(RestoreOutcome { safety })
-    }
-
-    fn safety_hint(safety: &Option<SnapshotRecord>) -> String {
-        safety
-            .as_ref()
-            .map(|r| {
-                format!(
-                    "\nthe pre-restore state was saved as snapshot {} — recover with: dbsnap restore {}",
-                    r.id, r.id
-                )
-            })
-            .unwrap_or_default()
-    }
-
-    fn quote_ident(s: &str) -> String {
-        format!("`{}`", s.replace('`', "``"))
+        bail!("MySQL/MariaDB restore is temporarily disabled: the previous implementation could replace the target before replay completed. Existing snapshots remain available; restore will return after a safe recovery design is implemented.")
     }
 
     fn quote_lit(s: &str) -> String {

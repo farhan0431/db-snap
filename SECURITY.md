@@ -46,9 +46,9 @@ They do not constitute a security audit or a production backup guarantee:
 - Dump-based snapshots (MySQL, `pg_dump`) are logical restores; a
   `--single-transaction` dump is consistent for InnoDB tables, not for
   MyISAM.
-- MySQL/MariaDB restore replaces the target before replay finishes; a replay
-  failure or interruption can leave it empty or partially restored. A safety
-  snapshot helps recovery but does not make the operation atomic.
+- MySQL/MariaDB restore is temporarily disabled because the prior implementation
+  could leave the target partially restored and dropped an unmanaged database.
+  Saving and listing existing snapshots remain available.
 - PostgreSQL clone restore is not atomic; the source snapshot is preserved.
   A recovery journal handles some interruptions, but ambiguous states require
   manual recovery. Dump replay occurs in staging before the same cutover.
@@ -56,7 +56,8 @@ They do not constitute a security audit or a production backup guarantee:
   verification; loopback uses no TLS unless `DBSNAP_PG_TLS=verify-full` is set.
   `DBSNAP_PG_CA_CERT` can supply an additional trusted PEM CA certificate.
 - MCP restore and prune are disabled unless the server is started with
-  `--allow-destructive`. There is no per-operation approval mechanism.
+  `--allow-destructive`; each call requires approval through MCP elicitation.
+  This depends on the client faithfully presenting the request to the user.
 - The masking layer is defense in depth, not a sandbox: an AI agent with
   shell access to your project can read `.env` itself.
 

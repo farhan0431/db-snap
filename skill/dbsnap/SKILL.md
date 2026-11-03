@@ -1,14 +1,13 @@
 ---
 name: dbsnap
-description: Database time-machine for the local development database (instant physical snapshot / rollback) for SQLite, PostgreSQL, and MySQL/MariaDB. Use when about to run schema migrations, DDL (ALTER TABLE, DROP COLUMN), bulk data changes, reseed scripts, or ORM migrate commands — or when the database is broken/corrupted and must be restored. Covers the dbsnap CLI and the dbsnap_* MCP tools.
+description: Database snapshots for local development. SQLite and PostgreSQL support restore; MySQL/MariaDB restore is temporarily disabled. Use before migrations or bulk changes, and verify the engine supports restoration. Covers the dbsnap CLI and MCP tools.
 ---
 
 # dbsnap — database time-machine for this project
 
-dbsnap takes **physical snapshots** of the local development database and
-restores them bit-for-bit — like git commit / git checkout for data. Unlike
-query-level undo, it works after `DROP COLUMN`, botched migrations, and broken
-foreign keys, and it is safe to run **while the dev server is still running**.
+dbsnap creates snapshots of local development databases. SQLite and PostgreSQL
+support restore; MySQL/MariaDB snapshots are logical dumps and **restore is
+temporarily disabled**. Do not rely on MySQL snapshots for rollback.
 Engines: SQLite (delta snapshots, milliseconds), PostgreSQL (server-side
 template clones, ~1 s with a brief connection blackout), and MySQL/MariaDB
 (consistent logical dumps, seconds on big databases).
@@ -19,7 +18,7 @@ template clones, ~1 s with a brief connection blackout), and MySQL/MariaDB
    (`ALTER`/`DROP`), seed/fresh scripts, or bulk updates, create a snapshot:
    `dbsnap_create_snapshot` (MCP) or `dbsnap save "<what-you-are-about-to-do>"`
    (CLI). Pick a tag that names the coming change, e.g. `before-auth-migration`.
-2. **Restore IMMEDIATELY when something breaks.** If a migration fails, the
+2. **Ask before restoring when something breaks.** If a migration fails, the
    schema looks wrong, or data regressed: `dbsnap_restore_snapshot`
    (omitting the argument restores the most recent snapshot) or
    `dbsnap rollback`. The pre-restore state is automatically kept as a safety
@@ -47,7 +46,7 @@ project root; `--db <path>` overrides the bound database).
 fingerprint binds the project; operating on a **different** database is
 refused (deliberate override: `--force`, or re-run `dbsnap init`). The MCP
 server allows SQLite and loopback hosts only; a local database may still contain important data.
-MCP restore and prune are disabled unless the server is started with `--allow-destructive`.
+MCP restore and prune require the server to be started with `--allow-destructive` and an explicit user confirmation for each operation via MCP elicitation. Clients without elicitation support cannot run these operations.
 
 ## Safety model (what you may rely on)
 
@@ -57,7 +56,7 @@ MCP restore and prune are disabled unless the server is started with `--allow-de
   snapshot (kept: last 3). Quoted in the output as a one-command way back.
 - Snapshots live in `.dbsnap/` (git-ignored); PostgreSQL clones live
   server-side as `__dbsnap_*` databases. Identical consecutive snapshots are
-  linked — snapshotting "just in case" costs nothing.
+  linked after contents are verified; a new snapshot still reads the database.
 - PostgreSQL note: a clone save/restore blocks NEW connections to the target
   database for about a second; the dev server reconnects on its own.
 

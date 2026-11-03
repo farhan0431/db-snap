@@ -88,8 +88,8 @@ database is protected.
 
 > Security note: MCP permits SQLite and loopback database hosts only. A local
 > database can still contain important data; verify the target before restore.
-> Restore and prune require starting the server with `--allow-destructive`;
-> this enables them for the session and does not provide per-operation approval.
+> Restore and prune require `--allow-destructive` and per-operation approval
+> through an MCP client supporting elicitation. Without that support, use the CLI.
 
 ## CLI cheat sheet (no MCP needed)
 

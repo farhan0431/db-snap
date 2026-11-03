@@ -291,6 +291,20 @@ pub fn restore_with(ctx: &Ctx, id_or_tag: Option<String>, safety: bool) -> Resul
     Ok(msg)
 }
 
+/// Resolve the exact snapshot before requesting human confirmation.
+pub fn resolve_restore_id(ctx: &Ctx, selector: Option<&str>) -> Result<String> {
+    let _lock = ctx.store.lock()?;
+    let fingerprint = ctx.db.fingerprint();
+    if ctx.store.load_config()? != fingerprint {
+        bail!("project binding changed");
+    }
+    ensure_catalog_binding(&ctx.store, &fingerprint)?;
+    if ctx.store.root.join("postgres-restore.json").exists() {
+        bail!("pending recovery must be resolved before requesting restore approval");
+    }
+    Ok(ctx.store.load_metadata()?.find(selector)?.id)
+}
+
 fn pg_target(db: &ResolvedDb) -> Option<&ServerTarget> {
     match &db.target {
         DbTarget::Postgres(pg) => Some(pg),

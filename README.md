@@ -16,6 +16,9 @@ your database themselves.
 
 **SQLite** (delta snapshots, ms) · **PostgreSQL** (server-side clones, s) · **MySQL/MariaDB** (consistent dumps, s)
 
+**MySQL/MariaDB restore is temporarily disabled for safety.** Snapshot creation
+remains available; do not rely on dbsnap to restore these dumps until safe restore returns.
+
 </div>
 
 ```bash
@@ -160,7 +163,8 @@ The agent gets six tools:
 
 Restore and prune are disabled by default in MCP. An operator can enable them
 for a server session by adding `--allow-destructive` to the MCP command arguments.
-This setting is not a per-operation approval prompt.
+Each operation then requires explicit approval through a client supporting MCP
+elicitation. Clients without elicitation support cannot invoke these operations.
 
 | Tool | What it tells the agent |
 | :--- | :--- |
@@ -229,10 +233,7 @@ apply it across every project. The canonical copy lives in
   `mariadb-dump` vs `mysqldump` and retries with a fallback flag set for the
   known cross-version quirks. Honest limit: dumps take seconds on big
   databases — MySQL has no physical hot-copy API.
-- **MySQL/MariaDB restore:** verify the dump's hash, capture the schema's
-  charset/collation, keep a safety dump of the current state, drop +
-  recreate the database with those attributes, replay the dump (stopping on
-  the first error).
+- **MySQL/MariaDB restore:** disabled until a safe recovery design is implemented.
 - **Prune** is a real GC: chunks shared by surviving snapshots are never
   deleted; server-side clones of pruned snapshots are dropped too. Full
   design: [docs/DESIGN.md §3.5](docs/DESIGN.md).
@@ -249,7 +250,7 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 scripts/e2e.sh       # SQLite: hot snapshot/rollback while a "dev server" writes
 scripts/e2e-pg.sh    # PostgreSQL: clone snapshot, destructive DDL, rollback
-scripts/e2e-mysql.sh # MySQL/MariaDB: consistent dump, destructive DDL, rollback
+scripts/e2e-mysql.sh # historical demo; rollback is currently disabled
 ```
 
 ## Measured, not marketing
@@ -263,7 +264,7 @@ machine:
 | SQLite snapshot (1.6 MB DB, one 8 KB row changed) | **46.9 KB** written (13.7× smaller than full copy) |
 | SQLite restore under a live WAL writer | data verified restored; server kept writing through the whole episode |
 | PostgreSQL `DROP COLUMN` → rollback | 50 rows + column verified back bit-for-bit via `psql` |
-| MySQL `DROP COLUMN` → rollback | 5 rows + column verified back via `mysql` client |
+| MySQL/MariaDB restore | Temporarily disabled pending a safe implementation |
 
 ## Roadmap
 

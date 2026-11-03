@@ -71,6 +71,10 @@ ALTER DATABASE dev_db WITH ALLOW_CONNECTIONS true;
 
 ### 2.3 MySQL / MariaDB (sejak v0.3.0)
 
+> Status implementasi saat ini: restore MySQL/MariaDB dinonaktifkan sementara
+> karena jalur lama dapat menghapus database target dan gagal saat replay.
+> Uraian restore di bawah adalah rancangan historis, bukan perilaku aktif.
+
 **Konsep:** tidak ada jalur fisik → dump logis konsisten. Tool ini memanggil `mysqldump`/`mysql` (atau `mariadb-dump`/`mariadb`) yang di-spawn tanpa shell.
 
 **Deteksi flavor (wajib — flag keduanya tidak identik):**

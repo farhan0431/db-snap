@@ -12,12 +12,12 @@ disposable databases; dbsnap is not a production backup system.
 | DB-004 Prune removes before metadata | Metadata is committed before artifact deletion; crash/power-loss and pending-GC retry remain to be tested. |
 | DB-005 PostgreSQL fence failure | Error cleanup and a recovery journal are implemented; process-exit tests cover a fence interruption. Network loss and power failure remain untested. |
 | DB-006 MCP private-network targets | MCP allows SQLite and loopback only; loopback is not proof a target is safe. |
-| DB-007 MCP destructive operations | Restore/prune disabled by default, with explicit session enablement. **Per-operation human approval is not implemented.** |
+| DB-007 MCP destructive operations | Restore/prune require session enablement and per-call MCP elicitation; unsupported clients fail closed. Tested allow/deny over stdio. This depends on the host faithfully showing the confirmation. |
 | DB-008 SQLite manifest binding | Manifest hash sequence and size are checked against the record before staging; reordered-hash regression tested. |
 | DB-009 PostgreSQL clone checksum | JSON/list output identifies its hash as a metadata fingerprint, not a content checksum. No cryptographic content verification exists for clones. |
 | DB-010 Artifact path traversal | Metadata artifact paths and obvious symlinks are rejected. Concurrent filesystem races and full OS-level containment remain unresolved. |
 | DB-011 PostgreSQL TLS | Non-loopback connections require certificate- and hostname-verified TLS. Windows Docker integration checked valid CA and wrong hostname; wider platform testing remains. |
-| DB-012 Dump restore failure | PostgreSQL replays into staging before cutover. **MySQL/MariaDB can still leave the target partially restored after replay failure or interruption.** |
+| DB-012 Dump restore failure | PostgreSQL replays into staging before cutover. **MySQL/MariaDB restore is temporarily disabled** because the prior implementation could leave a partial target and dropped an unmanaged database. Safe restore remains unimplemented. |
 | DB-013 SQLite creates missing database | Open-existing behavior implemented and tested. |
 | DB-014 Durability | File sync and Unix directory sync added for metadata; cross-platform power-loss durability remains unproven. |
 | DB-015 Temporary data privacy | New Unix `.dbsnap` directories are private; existing directory permissions, Windows ACLs, and crash cleanup remain unresolved. Snapshot data may contain sensitive information. |

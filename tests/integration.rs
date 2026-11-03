@@ -286,6 +286,126 @@ fn mcp_denies_destructive_operations_by_default() -> Result<()> {
 }
 
 #[test]
+fn mcp_destructive_calls_require_explicit_user_elicitation() -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "baseline")?;
+    add_rows(&db, 1, 2);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .args(["mcp", "--allow-destructive", "--db", db.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut read = || -> Result<serde_json::Value> {
+        let mut line = String::new();
+        if output.read_line(&mut line)? == 0 {
+            anyhow::bail!("MCP server closed early");
+        }
+        Ok(serde_json::from_str(&line)?)
+    };
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}}}})
+    )?;
+    input.flush()?;
+    assert_eq!(read()?["id"], 1);
+    for (id, accept) in [(2, false), (3, true)] {
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"dbsnap_restore_snapshot","arguments":{"tag_or_id":"baseline"}}})
+        )?;
+        input.flush()?;
+        let request = read()?;
+        assert_eq!(request["method"], "elicitation/create");
+        assert!(request["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("snapshot"));
+        let answer = if accept {
+            serde_json::json!({"action":"accept","content":{"confirm":true}})
+        } else {
+            serde_json::json!({"action":"decline"})
+        };
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":answer})
+        )?;
+        input.flush()?;
+        let response = read()?;
+        assert_eq!(response["id"], id);
+        assert_eq!(response["result"]["isError"], !accept);
+        assert_eq!(count_rows(&db), if accept { 1 } else { 2 });
+    }
+    let before_prune = dbsnap::storage::Storage::find(&root)
+        .unwrap()
+        .load_metadata()?
+        .snapshots
+        .len();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"dbsnap_prune","arguments":{"keep":1}}})
+    )?;
+    input.flush()?;
+    let approval = read()?;
+    assert_eq!(approval["method"], "elicitation/create");
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":approval["id"],"result":{"action":"decline"}})
+    )?;
+    input.flush()?;
+    assert_eq!(read()?["result"]["isError"], true);
+    assert_eq!(
+        dbsnap::storage::Storage::find(&root)
+            .unwrap()
+            .load_metadata()?
+            .snapshots
+            .len(),
+        before_prune
+    );
+    drop(input);
+    child.wait()?;
+    let mut unsupported = Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .args(["mcp", "--allow-destructive", "--db", db.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut input = unsupported.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}})
+    )?;
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"dbsnap_prune","arguments":{"keep":1}}})
+    )?;
+    drop(input);
+    let mut lines = BufReader::new(unsupported.stdout.take().unwrap()).lines();
+    let _: serde_json::Value = serde_json::from_str(&lines.next().unwrap()?)?;
+    let denied: serde_json::Value = serde_json::from_str(&lines.next().unwrap()?)?;
+    assert_eq!(denied["id"], 5);
+    assert_eq!(denied["result"]["isError"], true);
+    unsupported.wait()?;
+    Ok(())
+}
+
+#[test]
 fn prune_aborts_when_surviving_manifest_is_unreadable() -> Result<()> {
     let root = temp_root();
     let db = root.join("dev.db");
@@ -1378,7 +1498,7 @@ fn my_count(url: &str) -> Result<i64> {
 }
 
 #[test]
-fn mysql_dump_roundtrip() -> Result<()> {
+fn mysql_snapshot_is_saved_and_unsafe_restore_is_blocked() -> Result<()> {
     let Some(url) = my_setup_test_db("dump")? else {
         return Ok(());
     };
@@ -1401,22 +1521,13 @@ fn mysql_dump_roundtrip() -> Result<()> {
     // migrasi destruktif: kolom v hilang bersama datanya
     my_exec_url(&url, Some(&db), "ALTER TABLE items DROP COLUMN v;")?;
 
-    restore(&root, Path::new(&url), Some("myv1"), true)?;
-    assert_eq!(my_count(&url)?, 5, "dump restore must bring data back");
-
-    // kolom v benar-benar kembali
-    let v = my_run(&url, Some(&db), "SELECT v FROM items WHERE id = 1")?
-        .trim()
-        .to_string();
-    assert_eq!(v, "a");
-
-    // safety snapshot tercatat
+    let error = restore(&root, Path::new(&url), Some("myv1"), true).unwrap_err();
+    assert!(format!("{error:#}").contains("temporarily disabled"));
+    assert_eq!(my_count(&url)?, 5, "blocked restore must not alter target");
+    assert!(my_run(&url, Some(&db), "SELECT v FROM items").is_err());
     let store = dbsnap::storage::Storage::find(&root).unwrap();
     let meta = store.load_metadata()?;
-    assert!(meta
-        .snapshots
-        .iter()
-        .any(|s| s.tag.starts_with("auto-before-restore-")));
+    assert_eq!(meta.snapshots.len(), 1, "snapshot remains available");
 
     my_drop_test_db(&url);
     Ok(())
