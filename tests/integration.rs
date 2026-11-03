@@ -899,9 +899,8 @@ fn pg_setup_test_db(test: &str) -> Result<Option<String>> {
         n
     );
     let mut admin = cfg.connect(postgres::NoTls)?;
-    admin.batch_execute(&format!(
-        "DROP DATABASE IF EXISTS {dbname}; CREATE DATABASE {dbname};"
-    ))?;
+    admin.batch_execute(&format!("DROP DATABASE IF EXISTS {dbname}"))?;
+    admin.batch_execute(&format!("CREATE DATABASE {dbname}"))?;
     parsed.set_path(&format!("/{dbname}"));
     Ok(Some(parsed.to_string()))
 }
@@ -965,6 +964,10 @@ fn postgres_clone_roundtrip() -> Result<()> {
         .query_one("SELECT v FROM items WHERE id = 1", &[])?
         .get(0);
     assert_eq!(v, "v1");
+    drop(conn);
+    pg_exec(&url, "DELETE FROM items;")?;
+    restore(&root, Path::new(&url), Some("pgv1"), true)?;
+    assert_eq!(pg_count(&url)?, 5, "the same snapshot must be reusable");
 
     // safety snapshot tersimpan sebagai klon server-side tercatat
     let store = dbsnap::storage::Storage::find(&root).unwrap();

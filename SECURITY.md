@@ -46,7 +46,7 @@ They do not constitute a security audit or a production backup guarantee:
 - Dump-based snapshots (MySQL, `pg_dump`) are logical restores; a
   `--single-transaction` dump is consistent for InnoDB tables, not for
   MyISAM.
-- PostgreSQL clone restore is not atomic and may consume the source snapshot.
+- PostgreSQL clone restore is not atomic; the source snapshot is preserved.
   Interrupted operations can require manual recovery. PostgreSQL connections
   use `NoTls`; certificate-verified TLS is not implemented.
 - MCP restore and prune are disabled unless the server is started with

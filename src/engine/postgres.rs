@@ -275,6 +275,21 @@ impl PostgresEngine {
             );
         }
 
+        // Never rename the catalogued snapshot itself: restore from a separate
+        // managed clone so the same restore point remains available.
+        let working_name = format!(
+            "{SNAP_PREFIX}restore_{}",
+            util::new_id(&store.load_metadata()?.ids())
+        );
+        admin.execute(
+            &format!(
+                "CREATE DATABASE {} TEMPLATE {}",
+                Self::quote_ident(&working_name),
+                Self::quote_ident(snap_db)
+            ),
+            &[],
+        )?;
+
         let mut safety: Option<SnapshotRecord> = None;
         Self::fence(&mut admin, target)?;
         let outcome = (|| -> Result<()> {
@@ -318,7 +333,7 @@ impl PostgresEngine {
             admin.execute(
                 &format!(
                     "ALTER DATABASE {} RENAME TO {}",
-                    Self::quote_ident(snap_db),
+                    Self::quote_ident(&working_name),
                     Self::quote_ident(target)
                 ),
                 &[],

@@ -152,6 +152,16 @@ impl MysqlEngine {
                     "--set-gtid-purged=OFF",
                     "--column-statistics=0",
                 ]),
+                // MariaDB's dump client does not support MySQL's GTID or
+                // column-statistics flags even when connected to MySQL.
+                common(&[
+                    "--single-transaction",
+                    "--routines",
+                    "--triggers",
+                    "--events",
+                    "--hex-blob",
+                    "--no-tablespaces",
+                ]),
             ],
             Flavor::Maria => vec![
                 common(&[
@@ -455,6 +465,32 @@ mod tests {
             ]
             .iter()
             .all(|flag| set.iter().any(|value| value == flag))
+        }));
+    }
+
+    #[test]
+    fn mysql_fallback_supports_mariadb_dump_without_losing_objects() {
+        let engine = MysqlEngine::new(ServerTarget {
+            host: "localhost".into(),
+            port: 3306,
+            user: "test".into(),
+            password: None,
+            database: "app".into(),
+        });
+        assert!(engine.dump_flag_sets(Flavor::Mysql).iter().any(|set| {
+            [
+                "--single-transaction",
+                "--routines",
+                "--triggers",
+                "--events",
+                "--databases",
+                "app",
+            ]
+            .iter()
+            .all(|flag| set.iter().any(|value| value == flag))
+                && !set.iter().any(|flag| {
+                    flag.starts_with("--set-gtid-purged") || flag.starts_with("--column-statistics")
+                })
         }));
     }
 }
