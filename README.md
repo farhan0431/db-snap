@@ -16,8 +16,7 @@ your database themselves.
 
 **SQLite** (delta snapshots, ms) · **PostgreSQL** (server-side clones, s) · **MySQL/MariaDB** (consistent dumps, s)
 
-**MySQL/MariaDB restore is temporarily disabled for safety.** Snapshot creation
-remains available; do not rely on dbsnap to restore these dumps until safe restore returns.
+**MySQL/MariaDB restore is available for the original database.** Stop application writers and scheduled events first. Restore is not atomic; a mandatory pinned safety snapshot and recovery journal provide a recovery path. See [MySQL recovery](docs/MYSQL-RESTORE.md).
 
 </div>
 
@@ -233,7 +232,7 @@ apply it across every project. The canonical copy lives in
   `mariadb-dump` vs `mysqldump` and retries with a fallback flag set for the
   known cross-version quirks. Honest limit: dumps take seconds on big
   databases — MySQL has no physical hot-copy API.
-- **MySQL/MariaDB restore:** disabled until a safe recovery design is implemented.
+- **MySQL/MariaDB restore:** restores objects in place without dropping the database; mandatory safety snapshot, with manual recovery after interruptions.
 - **Prune** is a real GC: chunks shared by surviving snapshots are never
   deleted; server-side clones of pruned snapshots are dropped too. Full
   design: [docs/DESIGN.md §3.5](docs/DESIGN.md).
@@ -268,7 +267,7 @@ machine:
 | SQLite snapshot (1.6 MB DB, one 8 KB row changed) | **46.9 KB** written (13.7× smaller than full copy) |
 | SQLite restore under a live WAL writer | data verified restored; server kept writing through the whole episode |
 | PostgreSQL `DROP COLUMN` → rollback | 50 rows + column verified back bit-for-bit via `psql` |
-| MySQL/MariaDB restore | Temporarily disabled pending a safe implementation |
+| MySQL/MariaDB restore | Object restore and recovery tested on disposable databases |
 
 ## Roadmap
 

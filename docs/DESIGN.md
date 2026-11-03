@@ -71,9 +71,9 @@ ALTER DATABASE dev_db WITH ALLOW_CONNECTIONS true;
 
 ### 2.3 MySQL / MariaDB (sejak v0.3.0)
 
-> Status implementasi saat ini: restore MySQL/MariaDB dinonaktifkan sementara
-> karena jalur lama dapat menghapus database target dan gagal saat replay.
-> Uraian restore di bawah adalah rancangan historis, bukan perilaku aktif.
+> Restore MySQL/MariaDB berjalan pada database asal tanpa DROP DATABASE.
+> Safety snapshot wajib, dipin, dan journal menyimpan ID pemulihan.
+> Restore tidak atomik; hentikan writer dan event. Lihat `MYSQL-RESTORE.md`.
 
 **Konsep:** tidak ada jalur fisik → dump logis konsisten. Tool ini memanggil `mysqldump`/`mysql` (atau `mariadb-dump`/`mariadb`) yang di-spawn tanpa shell.
 
@@ -94,12 +94,12 @@ mysqldump --single-transaction --routines --triggers --events \
 - Keterbatasan diunggahkan: MyISAM tidak terjamin konsistensinya dengan `--single-transaction` (opsi `--lock-all-tables` tersedia via `--dump-extra-args`).
 - Host `localhost` **selalu diterjemahkan ke `127.0.0.1`** untuk klien TCP — di Linux klien `mysql` dengan host `localhost` mencoba unix socket dan sering gagal di setup Docker. (Gotcha nyata.)
 
-**Restore (berurutan, stop pada error pertama — tanpa `--force`):**
-1. Verifikasi hash snapshot (decompress ke `.dbsnap/tmp/`).
-2. Safety snapshot otomatis dari kondisi sekarang (§4-T7).
-3. Catat `DEFAULT_CHARACTER_SET_NAME`/`DEFAULT_COLLATION_NAME` dari `information_schema.SCHEMATA`.
-4. `DROP DATABASE` → buat ulang dengan charset/collation yang dicatat → replay dump.
-5. Bila replay gagal di tengah: pesan error **selalu** menyertakan perintah rollback satu-baris ke safety snapshot.
+**Restore:** replay langsung pada database asal, bukan staging. Dump lama memakai
+`--databases` dan dapat berisi SQL yang menyebut database secara eksplisit;
+menjalankannya dengan database staging sebagai default saja tidak menjamin
+SQL tersebut tetap berada di staging. Implementasi mempertahankan database target, membersihkan objek di dalamnya,
+lalu replay. Journal membatasi restore berikutnya ke safety snapshot jika
+terjadi interupsi. Dump harus tepercaya; tidak ada sandbox SQL.
 
 **Prasyarat pengguna:** `mysqldump` + `mysql` (atau varian mariadb) ada di PATH — mesin dev dengan MySQL praktis selalu memilikinya. Dicek di `dbsnap init` dengan pesan yang jelas bila absen.
 
@@ -219,7 +219,7 @@ DB kecil–menengah (10–200 MB — mayoritas kasus dev) sudah instan di mode f
 | T4 | Metadata.json sobek (proses mati saat save) | Tulis atomic tmp→rename; file snapshot juga ditulis ke tmp lalu di-rename **setelah** metadata commit. |
 | T5 | Dua proses dbsnap bersamaan (human + agent) | `lock` file via `fs4` — blocking dengan timeout 10 dtk, pesan error jelas siapa yang memegang. MCP server memakai lock yang sama. |
 | T6 | Proses mati di tengah fencing PG (koneksi developer terkunci permanen) | Re-enable `ALLOW_CONNECTIONS` idempoten di awal+akhir tiap operasi PG; `dbsnap status` mendeteksi & memperbaiki sisa fencing. |
-| T7 | Restore gagal di tengah jalan (PG drop sudah jalan / MySQL replay setengah) | **Safety snapshot otomatis** kondisi sekarang sebelum restore (default ON, `--no-safety-snapshot` untuk opt-out; retensi otomatis 3 terakhir ber-tag `auto-*`). Rollback satu perintah selalu tersedia. |
+| T7 | Restore gagal di tengah jalan | SQLite dan PostgreSQL membuat safety snapshot secara default (`--no-safety-snapshot` untuk opt-out). Pemulihan PostgreSQL yang terputus dapat memerlukan intervensi manual. Restore MySQL/MariaDB memakai safety snapshot wajib yang dipin dan journal pemulihan. |
 | T8 | Disk penuh saat save/restore → DB target korup | Cek ruang bebas (fs4) sebelum operasi; tolak bila < 100 MB atau < 2× ukuran snapshot. |
 | T9 | Filename/path injection lewat `tag` | Nama file = `<id>.zst` (id dibuat internal, hex); tag divalidasi `[A-Za-z0-9._-]`, maks 64 char, disimpan di metadata. |
 | T10 | SQL/shell injection dari input agent | Spawn **tanpa shell** (argv murni); identifier di-quote ketat (PG `"` / MySQL backtick); id/tag divalidasi. |
@@ -240,7 +240,7 @@ DB kecil–menengah (10–200 MB — mayoritas kasus dev) sudah instan di mode f
 | Restore SQLite via Backup API gagal di tengah | API bersifat transaksional — target dikembalikan ke kondisi semula oleh `backup_finish` (rusqlite menangani via drop guard). |
 | Koneksi PG terputus saat clone | Operasi dibatalkan; database sumber tidak pernah diubah (clone hanya CREATE). Sisa `__dbsnap_*` gagal di-drop otomatis. |
 | mysqldump gagal karena mismatch flag flavor | Retry otomatis dengan flag-set fallback (§2.3); error asli tetap ditampilkan bila dua-duanya gagal. |
-| Replay dump MySQL gagal di tengah | Database kondisi "setengah" → pesan error wajib menampilkan perintah rollback ke safety snapshot (T7). |
+| Replay dump MySQL gagal di tengah | Target dapat berubah sebagian; safety snapshot dipin dan journal mewajibkan pemulihan snapshot itu sebelum restore lain. |
 | Proses dibunuh (SIGKILL) kapan pun | Semua mutasi bertahap: lock melepas sendiri (flock), tmp dibereskan oleh operasi berikutnya, fencing PG dirawat healing (T6), metadata atomic (T4). |
 | Server PG/MySQL versi lama | `probe()` membaca versi; fitur yang butuh versi tertentu dicegah dengan pesan, bukan error samar di tengah jalan. |
 

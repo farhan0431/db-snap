@@ -622,6 +622,9 @@ pub fn pin_at(root: &Path, explicit: Option<&str>, selector: &str, pinned: bool)
         let ctx = context_at(root, explicit, false, false)?;
         let _lock = ctx.store.lock()?;
         ensure_active_binding(&ctx)?;
+        if !pinned && ctx.store.root.join("mysql-restore.json").exists() {
+            bail!("finish MySQL recovery before unpinning snapshots");
+        }
         let mut meta = ctx.store.load_metadata()?;
         let record = meta.find(Some(selector))?;
         let snapshot = meta
@@ -663,6 +666,7 @@ pub fn status_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
             "chunk_count": chunks,
             "chunk_bytes": chunk_bytes,
             "disk_free_bytes": ctx.store.free_bytes().ok(),
+            "mysql_recovery_pending": ctx.store.root.join("mysql-restore.json").exists(),
         }))?)
     })())
 }
@@ -701,9 +705,14 @@ pub fn status_with(ctx: &Ctx) -> Result<String> {
         .free_bytes()
         .map(|f| format!("\n  disk free : {}", util::format_size(f)))
         .unwrap_or_default();
+    let recovery = if ctx.store.root.join("mysql-restore.json").exists() {
+        "\nWARNING: MySQL recovery is pending; restore the pinned safety snapshot identified in mysql-restore.json."
+    } else {
+        ""
+    };
 
     Ok(format!(
-        "database  : {} ({})\nengine    : {}{}\nsnapshots : {} ({} unique files, {} on disk)\ndelta     : {manifests} manifests, {objects} chunks ({})\ntmp       : {tmp_leftovers} leftover files{free}",
+        "database  : {} ({})\nengine    : {}{}\nsnapshots : {} ({} unique files, {} on disk)\ndelta     : {manifests} manifests, {objects} chunks ({})\ntmp       : {tmp_leftovers} leftover files{free}{recovery}",
         ctx.db.engine,
         ctx.db.display(),
         info.detail,

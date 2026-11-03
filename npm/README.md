@@ -10,9 +10,7 @@ Supports **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. The npm package
 bundles prebuilt binaries for Windows x64, macOS Intel and Apple Silicon, and
 Linux x64 (glibc and musl) and ARM64 (glibc).
 
-**MySQL/MariaDB restore is temporarily disabled for safety.** Saving snapshots
-remains available, but do not rely on dbsnap to restore them until safe restore
-support returns.
+**MySQL/MariaDB restore is available for the original database.** Stop writers and scheduled events first. Restore is not atomic and requires a pinned safety snapshot. Interrupted restores must recover that snapshot before another restore.
 
 ## Install
 

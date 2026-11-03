@@ -1,13 +1,12 @@
 ---
 name: dbsnap
-description: Database snapshots for local development. SQLite and PostgreSQL support restore; MySQL/MariaDB restore is temporarily disabled. Use before migrations or bulk changes, and verify the engine supports restoration. Covers the dbsnap CLI and MCP tools.
+description: Database snapshots for local development. SQLite and PostgreSQL support restore; MySQL/MariaDB restore requires a safety snapshot and stopped writers. Use before migrations or bulk changes, and verify the engine supports restoration. Covers the dbsnap CLI and MCP tools.
 ---
 
 # dbsnap — database time-machine for this project
 
 dbsnap creates snapshots of local development databases. SQLite and PostgreSQL
-support restore; MySQL/MariaDB snapshots are logical dumps and **restore is
-temporarily disabled**. Do not rely on MySQL snapshots for rollback.
+support restore; MySQL/MariaDB uses logical dumps and non-atomic restore to the original database. Stop writers and scheduled events first. Keep the mandatory pinned safety snapshot; if interrupted, recover the ID in `.dbsnap/mysql-restore.json` before another restore.
 Engines: SQLite (delta snapshots, milliseconds), PostgreSQL (server-side
 template clones, ~1 s with a brief connection blackout), and MySQL/MariaDB
 (consistent logical dumps, seconds on big databases).

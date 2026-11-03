@@ -1503,7 +1503,7 @@ fn my_count(url: &str) -> Result<i64> {
 }
 
 #[test]
-fn mysql_snapshot_is_saved_and_unsafe_restore_is_blocked() -> Result<()> {
+fn mysql_dump_roundtrip_and_failure_recovery() -> Result<()> {
     let Some(url) = my_setup_test_db("dump")? else {
         return Ok(());
     };
@@ -1517,6 +1517,8 @@ fn mysql_snapshot_is_saved_and_unsafe_restore_is_blocked() -> Result<()> {
          CREATE TABLE items (id INT PRIMARY KEY, v TEXT);
          INSERT INTO items VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');
          CREATE PROCEDURE audit_proc() SELECT 42;
+         CREATE FUNCTION audit_func() RETURNS INT DETERMINISTIC RETURN 7;
+         CREATE VIEW audit_view AS SELECT id FROM items;
          CREATE TRIGGER audit_trigger BEFORE INSERT ON items FOR EACH ROW SET NEW.id = NEW.id;
          CREATE EVENT audit_event ON SCHEDULE EVERY 1 DAY DO SET @dbsnap_e2e = 1;",
     )?;
@@ -1538,14 +1540,110 @@ fn mysql_snapshot_is_saved_and_unsafe_restore_is_blocked() -> Result<()> {
     // migrasi destruktif: kolom v hilang bersama datanya
     my_exec_url(&url, Some(&db), "ALTER TABLE items DROP COLUMN v;")?;
 
-    let error = restore(&root, Path::new(&url), Some("myv1"), true).unwrap_err();
-    assert!(format!("{error:#}").contains("temporarily disabled"));
-    assert_eq!(my_count(&url)?, 5, "blocked restore must not alter target");
-    assert!(my_run(&url, Some(&db), "SELECT v FROM items").is_err());
-    let store = dbsnap::storage::Storage::find(&root).unwrap();
-    let meta = store.load_metadata()?;
-    assert_eq!(meta.snapshots.len(), 1, "snapshot remains available");
+    let path = store.snapshot_path(&rec)?;
+    let good = fs::read(&path)?;
+    fs::write(&path, b"corrupt")?;
+    assert!(restore(&root, Path::new(&url), Some("myv1"), true).is_err());
+    assert_eq!(my_count(&url)?, 5);
+    assert_eq!(store.load_metadata()?.snapshots.len(), 1);
+    fs::write(path, good)?;
 
+    assert!(restore(&root, Path::new(&url), Some("myv1"), false).is_err());
+    assert_eq!(my_count(&url)?, 5);
+    let other_url = my_setup_test_db("neighbor")?.unwrap();
+    let other_db = other_url.rsplit('/').next().unwrap();
+    my_exec_url(&other_url, Some(other_db), &format!("CREATE TABLE sentinel(id INT PRIMARY KEY); INSERT INTO sentinel VALUES(99); CREATE TABLE dependency(id INT, FOREIGN KEY(id) REFERENCES `{db}`.items(id));"))?;
+    let blocked = restore(&root, Path::new(&url), Some("myv1"), true).unwrap_err();
+    assert!(format!("{blocked:#}").contains("another database has foreign keys"));
+    assert_eq!(my_count(&url)?, 5);
+    my_exec_url(&other_url, Some(other_db), "DROP TABLE dependency")?;
+
+    my_exec_url(&url, Some(&db), "CREATE TABLE extra(id INT); CREATE VIEW extra_view AS SELECT id FROM extra; CREATE PROCEDURE extra_proc() SELECT 1;")?;
+    restore(&root, Path::new(&url), Some("myv1"), true)?;
+    assert_eq!(my_count(&url)?, 5);
+    assert_eq!(
+        my_run(&url, Some(&db), "SELECT v FROM items WHERE id=1")?.trim(),
+        "a"
+    );
+    assert!(my_run(&url, Some(&db), "SELECT * FROM extra").is_err());
+    assert!(my_run(&url, Some(&db), "SELECT * FROM extra_view").is_err());
+    assert!(my_run(&url, Some(&db), "CALL extra_proc()").is_err());
+    assert_eq!(my_run(&url, Some(&db), "CALL audit_proc()")?.trim(), "42");
+    assert_eq!(my_run(&url, Some(&db), "SELECT audit_func()")?.trim(), "7");
+    assert_eq!(
+        my_run(&url, Some(&db), "SELECT COUNT(*) FROM audit_view")?.trim(),
+        "5"
+    );
+    assert_eq!(
+        my_run(
+            &url,
+            Some(&db),
+            "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE()"
+        )?
+        .trim(),
+        "1"
+    );
+    assert_eq!(
+        my_run(
+            &url,
+            Some(&db),
+            "SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE()"
+        )?
+        .trim(),
+        "1"
+    );
+    restore(&root, Path::new(&url), Some("myv1"), true)?;
+    my_exec_url(&url, Some(&db), "INSERT INTO items VALUES(6,'recover me')")?;
+    for phase in ["mysql_after_cleanup", "mysql_exit_after_cleanup"] {
+        let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+            .current_dir(&root)
+            .env("DATABASE_URL", &url)
+            .env("DBSNAP_FAILPOINT", phase)
+            .args(["restore", "myv1"])
+            .output()?;
+        assert!(!failed.status.success());
+        let store = dbsnap::storage::Storage::find(&root).unwrap();
+        let recovery: String =
+            serde_json::from_slice(&fs::read(store.root.join("mysql-restore.json"))?)?;
+        assert!(store.load_metadata()?.find(Some(&recovery))?.pinned);
+        assert!(ops::pin_at(&root, Some(&url), &recovery, false).is_err());
+        assert!(ops::status_at(&root, Some(&url))?.contains("recovery is pending"));
+        assert!(restore(&root, Path::new(&url), Some("myv1"), true).is_err());
+        restore(&root, Path::new(&url), Some(&recovery), true)?;
+        assert_eq!(my_count(&url)?, 6);
+        assert!(!store.root.join("mysql-restore.json").exists());
+    }
+
+    // A valid checksum does not imply valid SQL. A real client replay error
+    // must leave the safety snapshot usable, just like process interruption.
+    let raw = root.join("invalid.sql");
+    fs::write(&raw, format!("USE `{db}`;\nTHIS IS INVALID SQL;\n"))?;
+    let mut broken = rec.clone();
+    broken.id = "f00dbad".into();
+    broken.tag = "invalid-sql".into();
+    broken.location = dbsnap::storage::Location::File {
+        path: "snapshots/f00dbad.sql.zst".into(),
+    };
+    let (original, size, hash) =
+        dbsnap::storage::compress::compress_to(&raw, &store.snapshot_path(&broken)?)?;
+    broken.original_bytes = original;
+    broken.size_bytes = size;
+    broken.blake3 = hash;
+    let mut metadata = store.load_metadata()?;
+    metadata.snapshots.push(broken);
+    store.write_metadata(&metadata)?;
+    let error = restore(&root, Path::new(&url), Some("invalid-sql"), true).unwrap_err();
+    assert!(format!("{error:#}").contains("MySQL replay failed"));
+    let recovery: String =
+        serde_json::from_slice(&fs::read(store.root.join("mysql-restore.json"))?)?;
+    restore(&root, Path::new(&url), Some(&recovery), true)?;
+    assert_eq!(my_count(&url)?, 6);
+
+    assert_eq!(
+        my_run(&other_url, Some(other_db), "SELECT id FROM sentinel")?.trim(),
+        "99"
+    );
+    my_drop_test_db(&other_url);
     my_drop_test_db(&url);
     Ok(())
 }

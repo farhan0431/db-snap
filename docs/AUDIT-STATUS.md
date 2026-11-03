@@ -17,13 +17,13 @@ disposable databases; dbsnap is not a production backup system.
 | DB-009 PostgreSQL clone checksum | JSON/list output identifies its hash as a metadata fingerprint, not a content checksum. No cryptographic content verification exists for clones. |
 | DB-010 Artifact path traversal | Metadata artifact paths and obvious symlinks are rejected. Concurrent filesystem races and full OS-level containment remain unresolved. |
 | DB-011 PostgreSQL TLS | Non-loopback connections require certificate- and hostname-verified TLS. Windows Docker integration checked valid CA and wrong hostname; wider platform testing remains. |
-| DB-012 Dump restore failure | PostgreSQL replays into staging before cutover. **MySQL/MariaDB restore is temporarily disabled** because the prior implementation could leave a partial target and dropped an unmanaged database. Safe restore remains unimplemented. |
+| DB-012 Dump restore failure | PostgreSQL replays into staging before cutover. MySQL/MariaDB now restores objects in the original target without dropping the database. Mandatory pinned safety snapshots and a recovery journal support retry after failure. Replay is NOT staged or atomic; trusted dumps and stopped writers/events are required. See MYSQL-RESTORE.md. Power-loss recovery remains unproven. |
 | DB-013 SQLite creates missing database | Open-existing behavior implemented and tested. |
 | DB-014 Durability | File sync and Unix directory sync added for metadata; cross-platform power-loss durability remains unproven. |
 | DB-015 Temporary data privacy | New Unix `.dbsnap` directories are private; existing directory permissions, Windows ACLs, and crash cleanup remain unresolved. Snapshot data may contain sensitive information. |
 | DB-016 Existing CAS chunk corruption | Existing chunks are verified before reuse; regression tested. A full verify command is not implemented. |
 | DB-017 SQLite WAL size | WAL path now appends `-wal`; more extension-specific tests are desirable. |
-| DB-018 CI/E2E and fault injection | PostgreSQL interruption tests exist; CI runs integration tests and now includes a PostgreSQL E2E smoke test and cleanup regression. MySQL fault injection and disk-full tests remain outstanding. |
+| DB-018 CI/E2E and fault injection | PostgreSQL interruption tests exist; CI runs integration tests and now includes a PostgreSQL E2E smoke test and cleanup regression. MySQL cleanup-failure and process-exit recovery tests added; disk-full tests remain outstanding. |
 | DB-019 Release gate | Release invokes CI and smoke-tests native binaries and the packed npm package. GitHub execution and cross-target packaging still require verification. |
 | DB-020 Documentation claims | Key safety and integrity claims revised. Full documentation consistency review remains. |
 | DB-021 PostgreSQL E2E cleanup | Cleanup uses the configured server and credentials, only drops a test database it created, and is tested on success and failure. The script retains the catalog and warns about remaining server-side snapshot clones. |
@@ -36,3 +36,24 @@ database-qualified SQL without redirecting it to the wrong target.
 All MySQL/MariaDB dump fallback options now retain routines, triggers, and
 events. If the installed client cannot supply these options, snapshot creation
 fails rather than silently omitting those objects.
+
+## MySQL restore follow-up
+
+Restore is enabled with mandatory pinned recovery snapshots and a journal.
+This is an in-place restore, not the originally proposed staging/cutover design.
+The implementation never drops the target database. See
+[MySQL restore and recovery](MYSQL-RESTORE.md) for operating requirements.
+
+Local verification used disposable MySQL 8.0 and MariaDB 11 containers, with
+Windows test binaries invoking the container client tools through temporary
+wrappers. Covered roundtrips, repeated restore, routines/views/triggers/events,
+removal of newly added objects, corrupt compressed input, SQL replay failure,
+error/process-exit recovery after cleanup, refusal of incoming cross-database
+foreign keys, and preservation of a sentinel in another test database.
+Release-binary E2E demos passed
+on both engines, restoring the dropped column and all five rows. The full local test suite passed
+with MySQL configured (21 unit tests, 39 integration test functions); PostgreSQL
+live tests and the credential test without a test password were skipped by their
+existing environment guards. Formatting, Clippy and the release build passed.
+This does not close the remaining durability, concurrent-writer, SQL isolation,
+disk-full or release-platform audit items.

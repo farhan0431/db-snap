@@ -5,11 +5,11 @@ use crate::util;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use std::collections::HashSet;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 /// MySQL has no physical hot-copy API — snapshots are consistent logical
-/// dumps (`mysqldump --single-transaction`, design §2.3). Restore is disabled
-/// until it can satisfy the project's target and recovery safety rules.
+/// dumps (`mysqldump --single-transaction`, design §2.3).
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Flavor {
@@ -49,6 +49,8 @@ impl MysqlEngine {
     /// the MYSQL_PWD env — never argv (§4-T10).
     fn base_args(&self) -> Vec<String> {
         vec![
+            "--protocol=TCP".into(),
+            "--default-character-set=utf8mb4".into(),
             "-h".into(),
             self.tcp_host(),
             "-P".into(),
@@ -60,6 +62,7 @@ impl MysqlEngine {
 
     fn run_client(&self, bin: &str, args: &[String]) -> Result<std::process::Output> {
         Command::new(bin)
+            .arg("--no-defaults")
             .args(args)
             .env("MYSQL_PWD", self.target.password.as_deref().unwrap_or(""))
             .output()
@@ -209,6 +212,7 @@ impl MysqlEngine {
                 .truncate(true)
                 .open(&raw_tmp)?;
             let output = Command::new(&dump_bin)
+                .arg("--no-defaults")
                 .args(self.base_args())
                 .args(&flags)
                 .env("MYSQL_PWD", self.target.password.as_deref().unwrap_or(""))
@@ -267,11 +271,178 @@ impl MysqlEngine {
 
     fn restore_dump(
         &self,
-        _store: &Storage,
-        _record: &SnapshotRecord,
-        _safety_tag: Option<&str>,
+        store: &Storage,
+        record: &SnapshotRecord,
+        safety_tag: Option<&str>,
     ) -> Result<RestoreOutcome> {
-        bail!("MySQL/MariaDB restore is temporarily disabled: the previous implementation could replace the target before replay completed. Existing snapshots remain available; restore will return after a safe recovery design is implemented.")
+        let mut meta = store.load_metadata()?;
+        if store.free_bytes()?
+            < record
+                .original_bytes
+                .saturating_mul(2)
+                .max(100 * 1024 * 1024)
+        {
+            bail!("insufficient free space for MySQL restore staging and recovery");
+        }
+        if meta.project_fingerprint.target != self.target.display() {
+            bail!("MySQL dumps can only be restored to their original target");
+        }
+        if !matches!(record.location, Location::File { .. }) || record.method != "mysql-dump" {
+            bail!("MySQL restore requires a mysql-dump file snapshot");
+        }
+        let raw = store
+            .tmp_dir()
+            .join(format!("mysql-restore-{}.sql", util::new_id(&meta.ids())));
+        let _guard = TemporaryFile::create(raw.clone())?;
+        compress::decompress_verified(
+            &store.snapshot_path(record)?,
+            &raw,
+            &record.blake3,
+            record.original_bytes,
+        )?;
+        // Legacy dumps contain USE and CREATE DATABASE. Replay only on the
+        // original database; never rewrite SQL with string substitution.
+        Self::check_dump_database(&raw, &self.target.database)?;
+        let journal = store.root.join("mysql-restore.json");
+        let pending: Option<String> = if journal.exists() {
+            Some(serde_json::from_slice(&std::fs::read(&journal)?)?)
+        } else {
+            None
+        };
+        if let Some(id) = &pending {
+            if id != &record.id {
+                bail!("interrupted MySQL restore: recover first with dbsnap restore {id}");
+            }
+        } else if safety_tag.is_none() {
+            bail!("MySQL restore requires a safety snapshot; omit --no-safety-snapshot");
+        }
+        let bin = self.pick_bin(Flavor::Mysql, false)?;
+        let cleanup = self.cleanup_sql(&bin)?;
+        let safety = if pending.is_none() {
+            let mut saved = self
+                .save_dump(store, safety_tag.unwrap(), &meta.ids())?
+                .record;
+            saved.pinned = true; // Never prune the recovery copy after failure.
+            meta.snapshots.push(saved.clone());
+            store.write_metadata(&meta)?;
+            // create_new prevents overwriting a concurrent/replaced journal.
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&journal)?;
+            file.write_all(&serde_json::to_vec(&saved.id)?)?;
+            file.sync_all()?;
+            Some(saved)
+        } else {
+            None
+        };
+        let recovery = pending
+            .as_deref()
+            .or_else(|| safety.as_ref().map(|r| r.id.as_str()))
+            .unwrap();
+        let result = (|| -> Result<()> {
+            self.sql(&bin, &cleanup)?;
+            if std::env::var("DBSNAP_FAILPOINT").as_deref() == Ok("mysql_after_cleanup") {
+                bail!("injected failure after MySQL cleanup");
+            }
+            if std::env::var("DBSNAP_FAILPOINT").as_deref() == Ok("mysql_exit_after_cleanup") {
+                std::process::exit(86);
+            }
+            let output = Command::new(&bin)
+                .arg("--no-defaults")
+                .args(self.base_args())
+                .args(["--binary-mode", "--database", &self.target.database])
+                .env("MYSQL_PWD", self.target.password.as_deref().unwrap_or(""))
+                .stdin(std::fs::File::open(&raw)?)
+                .output()
+                .context("replaying MySQL dump")?;
+            if !output.status.success() {
+                bail!(
+                    "MySQL replay failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            bail!("{error:#}\nTarget may be partially restored. Safety snapshot is pinned; recover with: dbsnap restore {recovery}");
+        }
+        std::fs::remove_file(journal)?;
+        // Recovery snapshots stay pinned deliberately, including after success.
+        Ok(RestoreOutcome { safety })
+    }
+
+    fn quote_ident(name: &str) -> String {
+        format!("`{}`", name.replace('`', "``"))
+    }
+
+    fn check_dump_database(path: &std::path::Path, database: &str) -> Result<()> {
+        let expected = format!("USE {};", Self::quote_ident(database));
+        let mut found = false;
+        for line in BufReader::new(std::fs::File::open(path)?).lines() {
+            let line = line?;
+            if line.starts_with("USE ") {
+                if line != expected {
+                    bail!("dump selects a different database; restore aborted");
+                }
+                found = true;
+            }
+            if line.to_ascii_uppercase().starts_with("DROP DATABASE ") {
+                bail!("dump drops a database; restore aborted");
+            }
+        }
+        if !found {
+            bail!("dump has no matching database selection; restore aborted");
+        }
+        Ok(())
+    }
+
+    /// Enumerate only objects belonging to the bound target. The database
+    /// itself (and its grants/default charset) is never dropped.
+    fn cleanup_sql(&self, bin: &str) -> Result<String> {
+        let db = Self::quote_lit(&self.target.database);
+        let exists = self.sql(
+            bin,
+            &format!("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME={db}"),
+        )?;
+        if exists.trim() != "1" {
+            bail!("target database does not exist");
+        }
+        let unsupported = self.sql(bin, &format!("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA={db} AND TABLE_TYPE NOT IN ('BASE TABLE','VIEW')"))?;
+        if unsupported.trim() != "0" {
+            bail!("target contains unsupported objects (for example MariaDB sequences); restore aborted");
+        }
+        let external = self.sql(bin, &format!("SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA={db} AND TABLE_SCHEMA<>{db}"))?;
+        if external.trim() != "0" {
+            bail!("another database has foreign keys referencing the target; restore aborted");
+        }
+        let objects = self.sql(bin, &format!(
+            "SELECT 'EVENT', HEX(EVENT_NAME) FROM information_schema.EVENTS WHERE EVENT_SCHEMA={db} UNION ALL SELECT 'VIEW', HEX(TABLE_NAME) FROM information_schema.VIEWS WHERE TABLE_SCHEMA={db} UNION ALL SELECT ROUTINE_TYPE, HEX(ROUTINE_NAME) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA={db} UNION ALL SELECT 'TABLE', HEX(TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA={db} AND TABLE_TYPE='BASE TABLE'"
+        ))?;
+        let mut sql = String::from("SET FOREIGN_KEY_CHECKS=0;\n");
+        for row in objects.lines() {
+            let (kind, hex) = row
+                .split_once('\t')
+                .context("invalid MySQL object listing")?;
+            if !matches!(kind, "EVENT" | "VIEW" | "PROCEDURE" | "FUNCTION" | "TABLE") {
+                bail!("unsupported MySQL object type");
+            }
+            if hex.len() % 2 != 0 || !hex.is_ascii() {
+                bail!("invalid MySQL object name");
+            }
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let name = String::from_utf8(bytes)?;
+            sql.push_str(&format!(
+                "DROP {kind} {}.{};\n",
+                Self::quote_ident(&self.target.database),
+                Self::quote_ident(&name)
+            ));
+        }
+        Ok(sql)
     }
 
     fn quote_lit(s: &str) -> String {
@@ -334,6 +505,23 @@ impl DatabaseEngine for MysqlEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_dump_selection_must_match_target() -> Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("dbsnap-mysql-selection-{}.sql", std::process::id()));
+        let _guard = TemporaryFile::create(path.clone())?;
+        std::fs::write(&path, "USE `app``name`;\n")?;
+        assert!(MysqlEngine::check_dump_database(&path, "app`name").is_ok());
+        assert!(MysqlEngine::check_dump_database(&path, "other").is_err());
+        std::fs::write(&path, "USE `app`;\nUSE `other`;\n")?;
+        assert!(MysqlEngine::check_dump_database(&path, "app").is_err());
+        std::fs::write(&path, "DROP DATABASE `app`;\nUSE `app`;\n")?;
+        assert!(MysqlEngine::check_dump_database(&path, "app").is_err());
+        std::fs::write(&path, "SELECT 1;\n")?;
+        assert!(MysqlEngine::check_dump_database(&path, "app").is_err());
+        Ok(())
+    }
 
     #[test]
     fn mariadb_fallback_supports_mysql_dump_without_losing_objects() {

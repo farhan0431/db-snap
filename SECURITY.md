@@ -46,9 +46,11 @@ They do not constitute a security audit or a production backup guarantee:
 - Dump-based snapshots (MySQL, `pg_dump`) are logical restores; a
   `--single-transaction` dump is consistent for InnoDB tables, not for
   MyISAM.
-- MySQL/MariaDB restore is temporarily disabled because the prior implementation
-  could leave the target partially restored and dropped an unmanaged database.
-  Saving and listing existing snapshots remain available.
+- MySQL/MariaDB restore replaces objects inside the original target database;
+  it does not drop the database. It is not atomic and requires quiescent writers
+  and scheduled events. A mandatory pinned safety snapshot and journal support
+  manual recovery. Dumps are trusted executable SQL, not sandboxed input.
+  See docs/MYSQL-RESTORE.md; crash/power-loss durability is not proven.
 - PostgreSQL clone restore is not atomic; the source snapshot is preserved.
   A recovery journal handles some interruptions, but ambiguous states require
   manual recovery. Dump replay occurs in staging before the same cutover.

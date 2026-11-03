@@ -2,8 +2,7 @@
 # End-to-end demo of dbsnap's MySQL/MariaDB engine:
 #
 #   a consistent --single-transaction dump, a destructive migration that
-#   drops a column with all its data, and a verified rollback (drop +
-#   recreate with original charset + replay).
+#   drops a column with all its data, and a verified in-place rollback.
 #
 # Prereq: a local MySQL/MariaDB + client tools in PATH. Defaults to
 # mysql://root@localhost:3306 — point DBSNAP_TEST_MYSQL_URL elsewhere
@@ -12,12 +11,6 @@
 # Usage: scripts/e2e-mysql.sh
 
 set -euo pipefail
-
-# Restore is deliberately disabled until a safe staged implementation exists.
-# Stop before creating or modifying any database; this historical demo requires
-# a working restore to recover from the destructive migration below.
-echo "MySQL/MariaDB restore is temporarily disabled; this destructive demo cannot run safely." >&2
-exit 1
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${DBSNAP_BIN:-$ROOT/target/release/dbsnap}"
@@ -46,8 +39,11 @@ MYSQL_ARGS=(-h "$MYHOST" -P "$MYPORT" -u "$MYUSER")
 
 WORK="$(mktemp -d)"
 DBNAME="dbsnap_e2e_$$"
+CREATED=0
 cleanup() {
-  "$MYSQL" "${MYSQL_ARGS[@]}" -e "DROP DATABASE IF EXISTS $DBNAME;" >/dev/null 2>&1 || true
+  if [ "$CREATED" = 1 ]; then
+    "$MYSQL" "${MYSQL_ARGS[@]}" -e "DROP DATABASE IF EXISTS $DBNAME;" >/dev/null 2>&1 || true
+  fi
   rm -rf "$WORK" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -57,6 +53,7 @@ URL="${BASE_URL%/*}/$DBNAME"
 
 echo "== creating test database $DBNAME =="
 "$MYSQL" "${MYSQL_ARGS[@]}" -e "CREATE DATABASE $DBNAME CHARACTER SET utf8mb4;" >/dev/null
+CREATED=1
 "$MYSQL" "${MYSQL_ARGS[@]}" "$DBNAME" -e "
   CREATE TABLE users (id INT PRIMARY KEY AUTO_INCREMENT, email TEXT);
   INSERT INTO users (email) VALUES ('u1@t.dev'),('u2@t.dev'),('u3@t.dev'),('u4@t.dev'),('u5@t.dev');"
@@ -67,7 +64,7 @@ echo "== agent snapshots (consistent logical dump) =="
 echo "== destructive migration: ALTER TABLE users DROP COLUMN email =="
 "$MYSQL" "${MYSQL_ARGS[@]}" "$DBNAME" -e "ALTER TABLE users DROP COLUMN email;"
 
-echo "== rollback (verify hash -> charset capture -> safety dump -> drop -> replay) =="
+echo "== rollback (verify hash -> pinned safety dump -> object cleanup -> replay) =="
 "$BIN" rollback --db "$URL"
 
 echo "== verify: column + data must be back =="
