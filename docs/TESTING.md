@@ -46,6 +46,13 @@ requires replay to fail with full storage after journal commit, releases the
 filler database, restores the pinned recovery snapshot and verifies the original
 data. It must never run against a shared server. Its bounded tablespace avoids
 exhausting the host filesystem. CI has a separate two-engine job for this test.
+MariaDB can abort if rollback itself exhausts the shared tablespace. For an
+explicit disposable Docker fixture, set `DBSNAP_TEST_STORAGE_CONTAINER` to its
+container ID/name. The test verifies the image and published port, restarts the
+same datadir with a larger bounded tablespace, then still requires successful
+dbsnap recovery and the original data. `--exercise-server-restart` tests this
+path even if the server stayed alive. This fixture repair is test orchestration;
+dbsnap itself does not manage Docker or repair crashed database servers.
 
 The script exercises help/version, init, save, list/status (text and JSON), diff,
 pin/unpin, prune --keep/--all, restore, rollback, and MCP session startup. It calls

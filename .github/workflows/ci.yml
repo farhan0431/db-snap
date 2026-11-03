@@ -168,14 +168,15 @@ jobs:
       - name: Install clients
         run: sudo apt-get update && sudo apt-get install -y default-mysql-client
       - run: cargo build
-      - name: Real bounded InnoDB storage-full replay and recovery
-        run: python scripts/test-mysql-storage-full.py --binary target/debug/dbsnap
-        env:
-          DBSNAP_TEST_MYSQL_STORAGE_URL: ${{ matrix.scheme }}://root@127.0.0.1:3339/mysql
       - name: Connected client and enabled event refusal
         run: cargo test mysql_restore_refuses_active_clients_and_events -- --nocapture
         env:
           DBSNAP_TEST_MYSQL_URL: ${{ matrix.scheme }}://root@127.0.0.1:3339/mysql
+      - name: Real bounded InnoDB storage-full replay and recovery
+        run: python scripts/test-mysql-storage-full.py --binary target/debug/dbsnap
+        env:
+          DBSNAP_TEST_MYSQL_STORAGE_URL: ${{ matrix.scheme }}://root@127.0.0.1:3339/mysql
+          DBSNAP_TEST_STORAGE_CONTAINER: ${{ job.services.bounded.id }}
 
   security:
     runs-on: ubuntu-latest

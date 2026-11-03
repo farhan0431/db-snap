@@ -81,3 +81,15 @@ retained so a fallback compatibility error cannot hide an earlier write failure.
 
 Reproduction commands and test semantics: [TESTING.md](TESTING.md).
 Open audit findings: [AUDIT-STATUS.md](AUDIT-STATUS.md).
+
+## Hosted release follow-up
+
+The `v0.3.12` hosted run exposed two QA portability assumptions: MariaDB's
+disk-full helper required `mariadb-dump` even when `mysqldump` was a supported
+fallback, and the storage test expected the server to remain alive. On hosted
+MariaDB 11.8.9, rollback at the shared-tablespace limit aborted the server.
+dbsnap retained the recovery journal and pinned snapshot. The helper now uses
+the same client-name fallback as the engine. Explicit Docker storage fixtures
+can be restarted with expanded bounded storage before the test retries recovery;
+the test still requires the original data to be restored. These fixes are
+prepared for `v0.3.13`; the failed tag is not rewritten.

@@ -27,6 +27,11 @@ def checked(args, **kwargs):
     return result.stdout
 
 
+def find_dump_client(scheme):
+    primary, fallback = ("mariadb-dump", "mysqldump") if scheme == "mariadb" else ("mysqldump", "mariadb-dump")
+    return shutil.which(primary) or shutil.which(fallback)
+
+
 class Mcp:
     def __init__(self, binary, root, url, allow):
         args = [str(binary), "mcp", "--db", url]
@@ -153,7 +158,7 @@ def main():
                     fault_env["DBSNAP_TEST_DUMP_DISK_FULL"] = "1"
                 else:
                     assert Path("/dev/full").exists(), "requires Unix /dev/full or the remote QA adapter"
-                    real_dump = shutil.which("mariadb-dump" if parsed.scheme == "mariadb" else "mysqldump")
+                    real_dump = find_dump_client(parsed.scheme)
                     assert real_dump, "dump client is required"
                     wrappers = root / "full-client"
                     wrappers.mkdir()

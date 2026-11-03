@@ -53,6 +53,11 @@ fix the disk/connection problem and restore the journal's recovery ID. Recovery
 can itself fail if the server still lacks space. The journal and pinned copy
 remain available for another attempt. See [TESTING.md](TESTING.md) for real
 dump-client `/dev/full` tests and simulated I/O failure boundaries.
+If the database server terminates under storage pressure, restore its
+availability and sufficient storage before retrying dbsnap recovery. In a hosted
+MariaDB 11.8.9 test, rollback at the shared-tablespace limit terminated the
+server; the journal and pinned dump remained intact. dbsnap does not restart or
+repair the database server automatically.
 
 This is an in-place, non-atomic restore, not a staging/cutover implementation.
 SQL dumps must be trusted: the database-selection compatibility check is not a

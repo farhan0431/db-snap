@@ -1,10 +1,18 @@
 {
   "name": "db-snap-linux-x64-gnu",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "description": "dbsnap binary for Linux x64 (glibc)",
   "license": "MIT",
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "libc": ["glibc"],
-  "files": ["bin"]
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "bin"
+  ]
 }
