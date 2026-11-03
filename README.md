@@ -8,7 +8,7 @@ Physical, DDL-proof snapshots in milliseconds — with a built-in
 **MCP server** so Cursor, Windsurf, and Claude Code can protect and heal
 your database themselves.
 
-[![CI](https://github.com/username/db-snap/actions/workflows/ci.yml/badge.svg)](https://github.com/username/db-snap/actions/workflows/ci.yml)
+[![CI](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml/badge.svg)](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/dbsnap.svg)](https://crates.io/crates/dbsnap)
 [![npm](https://img.shields.io/npm/v/db-snap.svg)](https://www.npmjs.com/package/db-snap)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

@@ -30,7 +30,7 @@ function resolveBinary() {
   if (!candidates) {
     fail(
       `no prebuilt binary for ${target}. Supported: ${Object.keys(PKGS_BY_TARGET).join(", ")}. ` +
-        `Build from source: cargo install --git https://github.com/username/db-snap`
+        `Build from source: cargo install --git https://github.com/farhan0431/db-snap`
     );
   }
   for (const pkg of candidates) {

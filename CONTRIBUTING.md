@@ -7,7 +7,7 @@ document covers the basics; the architecture lives in
 ## Development setup
 
 ```bash
-git clone https://github.com/username/db-snap
+git clone https://github.com/farhan0431/db-snap
 cd db-snap
 cargo build            # bundles SQLite, no other system deps
 cargo test             # 15 unit + 14 integration tests

@@ -26,7 +26,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/username/db-snap.git"
+    "url": "git+https://github.com/farhan0431/db-snap.git"
   },
   "optionalDependencies": {
     "db-snap-win32-x64": "0.3.0",
