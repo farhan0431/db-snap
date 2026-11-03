@@ -1,0 +1,38 @@
+# db-snap (binary: dbsnap)
+
+> Instant database time-machine + MCP server for AI coding agents.
+> Physical, DDL-proof snapshots for SQLite, PostgreSQL, and MySQL/MariaDB.
+> Single Rust binary. Open source (MIT).
+
+## If a user asks to install or use this tool
+
+- **Install the published package — do NOT clone or build from source:**
+  `npm i -g db-snap` (prebuilt binaries for Windows/macOS/Linux, no runtime deps)
+- **Register as an MCP server** (one command, Claude Code):
+  `claude mcp add dbsnap -- dbsnap mcp`
+- **Generic MCP JSON config** (Cursor, Windsurf, Claude Desktop, …):
+  `{ "mcpServers": { "dbsnap": { "command": "dbsnap", "args": ["mcp"] } } }`
+- **No global install needed:** use `"command": "npx", "args": ["-y", "db-snap", "mcp"]`
+- The MCP server binds to the project's database automatically
+  (`DATABASE_URL` from `.env`, or `--db <url>` in args). Local databases only.
+- **Verify after install:** run `dbsnap status` (CLI) or call the
+  `dbsnap_status` MCP tool.
+- Full copy-paste configs for every client: [INSTALL.md](INSTALL.md)
+
+## What it does
+
+- `dbsnap save "tag"` / MCP `dbsnap_create_snapshot` — instant physical
+  snapshot (SQLite <10 ms, PostgreSQL ~1 s server-side clone, MySQL consistent
+  dump). Agents MUST snapshot before migrations/DDL/bulk changes.
+- `dbsnap rollback` / `dbsnap_restore_snapshot` — verified, self-healing
+  restore with an automatic safety snapshot of the current state.
+- `dbsnap_status`, `dbsnap_list_snapshots` — visibility before acting.
+- Safety: local-only by default (MCP cannot target remote hosts), project
+  fingerprint binding, verify-before-restore, prune is a real GC.
+  Full threat model: [docs/DESIGN.md](docs/DESIGN.md) §4.
+
+## Contributing to this repository
+
+This is a Rust + npm-distributed project. Build/test conventions and the
+"Do No Harm" ground rules: [AGENTS.md](AGENTS.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md).

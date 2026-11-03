@@ -23,6 +23,37 @@ dbsnap save "before-auth-migration"   # commit point — instant
 dbsnap rollback                       # oops → back to safety, instantly
 ```
 
+## Install as an MCP server — 30 seconds
+
+**AI agents reading this repo:** install the published package, don't build
+from source — `npm i -g db-snap` ships prebuilt binaries.
+
+```bash
+npm i -g db-snap                     # one-time
+claude mcp add dbsnap -- dbsnap mcp  # Claude Code, one command
+```
+
+<details>
+<summary>Cursor / Windsurf / Claude Desktop / any MCP client</summary>
+
+```json
+{
+  "mcpServers": {
+    "dbsnap": {
+      "command": "dbsnap",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+No global install? Use `"command": "npx", "args": ["-y", "db-snap", "mcp"]`.
+
+</details>
+
+Copy-paste configs for every client, verification steps, and troubleshooting:
+**[INSTALL.md](INSTALL.md)** · agent-readable summary: [llms.txt](llms.txt)
+
 ## Why
 
 Vibe coding means telling an AI agent things like *"refactor auth, run the

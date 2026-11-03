@@ -3,6 +3,15 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Agent/repo discoverability for MCP installation: `llms.txt` (LLM-readable
+  install summary), `AGENTS.md` (conventions for agents working on the
+  repo), `INSTALL.md` (copy-paste MCP configs for Claude Code, Cursor,
+  Windsurf, Claude Desktop, and generic clients), and a top-of-README
+  install block.
+
 ## [0.3.0] — 2026-11-03
 
 ### Added
