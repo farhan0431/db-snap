@@ -182,6 +182,14 @@ impl Storage {
     /// Create `.dbsnap/` in `start`, (re)binding the project fingerprint.
     pub fn create(start: &Path, fingerprint: &Fingerprint) -> Result<Storage> {
         let root = start.join(DBSNAP_DIR);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700).create(&root)?;
+        }
+        #[cfg(not(unix))]
+        fs::create_dir_all(&root)?;
         fs::create_dir_all(root.join("snapshots"))?;
         fs::create_dir_all(root.join("tmp"))?;
         fs::create_dir_all(root.join("objects"))?;
@@ -366,6 +374,27 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn new_storage_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("dbsnap-private-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let store = Storage::create(
+            &base,
+            &Fingerprint {
+                engine: "sqlite".into(),
+                target: "test".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&store.root).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        fs::remove_dir_all(&base).ok();
+    }
 
     #[test]
     fn find_walks_upwards() {

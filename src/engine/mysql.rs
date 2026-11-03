@@ -277,7 +277,7 @@ impl MysqlEngine {
 
         // 1. Verify integrity BEFORE touching the database (§4-T3).
         let sql_tmp = store.tmp_dir().join(format!("restore-{}.sql", record.id));
-        compress::decompress_verified(&dump_zst, &sql_tmp, &record.blake3)?;
+        compress::decompress_verified(&dump_zst, &sql_tmp, &record.blake3, record.original_bytes)?;
 
         // 2. Capture charset/collation so the recreation matches (§2.3).
         let db_lit = Self::quote_lit(&self.target.database);
@@ -345,13 +345,13 @@ impl MysqlEngine {
             Ok(o) => {
                 let hint = Self::safety_hint(&safety);
                 bail!(
-                    "replay failed: {}{hint}",
+                    "replay failed; the target database may be partially restored: {}{hint}",
                     String::from_utf8_lossy(&o.stderr).trim()
                 );
             }
             Err(e) => {
                 let hint = Self::safety_hint(&safety);
-                bail!("could not run {exec_bin}: {e}{hint}");
+                bail!("could not run {exec_bin}; the target database may be empty or partially restored: {e}{hint}");
             }
         }
         let verified = self

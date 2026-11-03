@@ -160,9 +160,17 @@ impl Storage {
                 "delta object {hex} is missing — the .dbsnap store is incomplete; do not delete .dbsnap/objects manually"
             );
         }
+        if fs::metadata(&path)?.len() > (CHUNK_SIZE as u64 * 2) {
+            bail!("delta object {hex} exceeds the compressed size limit");
+        }
         let compressed = fs::read(&path)?;
-        let data = zstd::stream::decode_all(&compressed[..])
+        let decoder = zstd::stream::read::Decoder::new(&compressed[..])
             .with_context(|| format!("delta object {hex} is corrupt (zstd decode failed)"))?;
+        let mut data = Vec::new();
+        decoder.take(CHUNK_SIZE as u64 + 1).read_to_end(&mut data)?;
+        if data.len() > CHUNK_SIZE {
+            bail!("delta object {hex} exceeds the chunk size limit");
+        }
         let actual = blake3::hash(&data).to_hex().to_string();
         if actual != hex {
             bail!(

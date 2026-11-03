@@ -11,7 +11,11 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   build-platform:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +58,13 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: strip "target/${{ matrix.target }}/release/dbsnap" || true
+      - name: Smoke test native binary
+        if: matrix.cross != true
+        shell: bash
+        run: |
+          EXT=""
+          [ "${{ runner.os }}" = "Windows" ] && EXT=".exe"
+          "target/${{ matrix.target }}/release/dbsnap$EXT" --version
       - name: Stage binary and release archive
         shell: bash
         run: |
@@ -91,16 +102,28 @@ jobs:
           pattern: zip-*
           merge-multiple: true
           path: zips/
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: zips/*.zip
-          generate_release_notes: true
       - uses: actions/download-artifact@v4
         with:
           pattern: binary-*
           merge-multiple: true
           path: npm/binaries/
+      - name: Test packed npm package
+        shell: bash
+        run: |
+          for target in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin; do
+            test -s "npm/binaries/$target/dbsnap"
+            chmod +x "npm/binaries/$target/dbsnap"
+          done
+          test -s npm/binaries/x86_64-pc-windows-msvc/dbsnap.exe
+          mkdir -p "$RUNNER_TEMP/dbsnap-package"
+          npm pack ./npm --pack-destination "$RUNNER_TEMP/dbsnap-package"
+          npm install --prefix "$RUNNER_TEMP/dbsnap-package/install" "$RUNNER_TEMP"/dbsnap-package/*.tgz
+          "$RUNNER_TEMP/dbsnap-package/install/node_modules/.bin/dbsnap" --version
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zips/*.zip
+          generate_release_notes: true
       - name: Verify and publish npm package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

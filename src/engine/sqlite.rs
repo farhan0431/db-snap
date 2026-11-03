@@ -153,7 +153,7 @@ impl SqliteEngine {
                     );
                 }
                 let staged = store.tmp_dir().join(format!("restore-{}.db", record.id));
-                compress::decompress_verified(&src, &staged, &record.blake3)?;
+                compress::decompress_verified(&src, &staged, &record.blake3, record.original_bytes)?;
                 Ok(staged)
             }
             Location::Manifest { path } => {

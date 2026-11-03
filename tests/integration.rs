@@ -518,6 +518,23 @@ fn saving_unchanged_database_rejects_corrupt_existing_chunks() -> Result<()> {
 }
 
 #[test]
+fn oversized_delta_chunk_is_rejected_before_allocation() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let oversized = vec![42u8; dbsnap::storage::cas::CHUNK_SIZE + 1];
+    let hash = blake3::hash(&oversized).to_hex().to_string();
+    let path = store.checked_chunk_path(&hash)?;
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, zstd::stream::encode_all(&oversized[..], 3)?)?;
+    let error = store.read_chunk_verified(&hash).unwrap_err();
+    assert!(error.to_string().contains("chunk size limit"));
+    Ok(())
+}
+
+#[test]
 fn corrupt_delta_object_is_rejected_before_touching_db() -> Result<()> {
     let root = temp_root();
     let db = root.join("dev.db");
