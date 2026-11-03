@@ -1,6 +1,6 @@
 {
   "name": "db-snap-linux-x64-gnu",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "dbsnap binary for Linux x64 (glibc)",
   "license": "MIT",
   "os": ["linux"],

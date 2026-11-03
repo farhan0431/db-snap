@@ -12,7 +12,7 @@ const path = require("path");
 const fs = require("fs");
 
 const PKGS_BY_TARGET = {
-  "win32-x64": ["db-snap-win32-x64"],
+  "win32-x64": ["@farhan0431/db-snap-win32-x64"],
   "darwin-arm64": ["db-snap-darwin-arm64"],
   "darwin-x64": ["db-snap-darwin-x64"],
   "linux-x64": ["db-snap-linux-x64-gnu", "db-snap-linux-x64-musl"],

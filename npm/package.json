@@ -1,6 +1,6 @@
 {
   "name": "db-snap",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Instant physical database time-machine and MCP server for AI coding agents — git commit/checkout for your local database, powered by Rust.",
   "license": "MIT",
   "bin": {
@@ -29,11 +29,11 @@
     "url": "git+https://github.com/farhan0431/db-snap.git"
   },
   "optionalDependencies": {
-    "db-snap-win32-x64": "0.3.5",
-    "db-snap-darwin-arm64": "0.3.5",
-    "db-snap-darwin-x64": "0.3.5",
-    "db-snap-linux-x64-gnu": "0.3.5",
-    "db-snap-linux-x64-musl": "0.3.5",
-    "db-snap-linux-arm64": "0.3.5"
+    "@farhan0431/db-snap-win32-x64": "0.3.6",
+    "db-snap-darwin-arm64": "0.3.6",
+    "db-snap-darwin-x64": "0.3.6",
+    "db-snap-linux-x64-gnu": "0.3.6",
+    "db-snap-linux-x64-musl": "0.3.6",
+    "db-snap-linux-arm64": "0.3.6"
   }
 }
