@@ -42,6 +42,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: https://registry.npmjs.org/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -101,16 +105,17 @@ jobs:
         working-directory: ${{ env.STAGE }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          # versi yang sudah ada di registry tidak boleh menggagalkan rilis ulang tag
-          npm publish --access public --non-interactive || \
-            echo "::warning::publish ${{ matrix.npm_name }} skipped (mungkin sudah ada)"
+        run: npm publish --access public --non-interactive
 
   release-meta:
     needs: build-platform
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: https://registry.npmjs.org/
       - uses: actions/download-artifact@v4
         with:
           pattern: zip-*
@@ -134,4 +139,4 @@ jobs:
             fs.writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
           cd npm
-          npm publish --access public --non-interactive || echo "::warning::publish db-snap skipped (mungkin sudah ada)"
+          npm publish --access public --non-interactive
