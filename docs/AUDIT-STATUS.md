@@ -23,10 +23,10 @@ disposable databases; dbsnap is not a production backup system.
 | DB-015 Temporary data privacy | New Unix `.dbsnap` directories are private; existing directory permissions, Windows ACLs, and crash cleanup remain unresolved. Snapshot data may contain sensitive information. |
 | DB-016 Existing CAS chunk corruption | Existing chunks are verified before reuse; regression tested. A full verify command is not implemented. |
 | DB-017 SQLite WAL size | WAL path now appends `-wal`; more extension-specific tests are desirable. |
-| DB-018 CI/E2E and fault injection | PostgreSQL interruption tests exist; CI runs integration tests. MySQL fault injection, disk-full tests, and E2E scripts remain outstanding. |
+| DB-018 CI/E2E and fault injection | PostgreSQL interruption tests exist; CI runs integration tests and now includes a PostgreSQL E2E smoke test and cleanup regression. MySQL fault injection and disk-full tests remain outstanding. |
 | DB-019 Release gate | Release invokes CI and smoke-tests native binaries and the packed npm package. GitHub execution and cross-target packaging still require verification. |
 | DB-020 Documentation claims | Key safety and integrity claims revised. Full documentation consistency review remains. |
-| DB-021 PostgreSQL E2E cleanup | Not yet addressed. |
+| DB-021 PostgreSQL E2E cleanup | Cleanup uses the configured server and credentials, only drops a test database it created, and is tested on success and failure. The script retains the catalog and warns about remaining server-side snapshot clones. |
 | DB-022 Orphan dumps | PostgreSQL dump writes to staging and cleans normal failure; crashes and other partial artifacts still need safe cleanup. |
 
 Do not tag a release as fully audited or production-ready while the unresolved

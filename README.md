@@ -237,21 +237,25 @@ apply it across every project. The canonical copy lives in
 - **Prune** is a real GC: chunks shared by surviving snapshots are never
   deleted; server-side clones of pruned snapshots are dropped too. Full
   design: [docs/DESIGN.md §3.5](docs/DESIGN.md).
-- **Safety (PostgreSQL):** dbsnap only ever creates/drops/renames databases
-  under the `__dbsnap_` prefix, always re-enables connections (even after a
-  crash mid-operation), and hard-refuses remote hosts unless you pass
-  `--allow-remote`.
+- **Safety (PostgreSQL):** dbsnap restricts database drops to names under the
+  `__dbsnap_` prefix and refuses remote hosts unless you pass `--allow-remote`.
+  Restore preserves the previous database during cutover; recovery after an
+  interruption can require manual intervention.
 
 ## Development
 
 ```bash
-cargo test        # 25 tests incl. live PostgreSQL & MySQL (DBSNAP_TEST_PG_URL / DBSNAP_TEST_MYSQL_URL)
+cargo test        # live database tests require DBSNAP_TEST_PG_URL / DBSNAP_TEST_MYSQL_URL
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 scripts/e2e.sh       # SQLite: hot snapshot/rollback while a "dev server" writes
-scripts/e2e-pg.sh    # PostgreSQL: clone snapshot, destructive DDL, rollback
-scripts/e2e-mysql.sh # historical demo; rollback is currently disabled
+bash scripts/e2e-pg.sh    # PostgreSQL: clone snapshot, destructive DDL, rollback
+bash scripts/e2e-mysql.sh # stops immediately; rollback is currently disabled
 ```
+
+The PostgreSQL demo requires Python 3 and a disposable server. It removes its
+test database but retains the snapshot catalog and may leave server-side
+clones; it prints the catalog location for inspection.
 
 ## Measured, not marketing
 

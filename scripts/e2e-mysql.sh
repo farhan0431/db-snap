@@ -13,6 +13,12 @@
 
 set -euo pipefail
 
+# Restore is deliberately disabled until a safe staged implementation exists.
+# Stop before creating or modifying any database; this historical demo requires
+# a working restore to recover from the destructive migration below.
+echo "MySQL/MariaDB restore is temporarily disabled; this destructive demo cannot run safely." >&2
+exit 1
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${DBSNAP_BIN:-$ROOT/target/release/dbsnap}"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) BIN="$BIN.exe" ;; esac

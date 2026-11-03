@@ -57,6 +57,15 @@ jobs:
         run: cargo test
         env:
           DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@localhost:5433/app_admin
+      - name: PostgreSQL E2E cleanup regression
+        run: bash scripts/test-e2e-pg.sh
+      - name: PostgreSQL E2E smoke test
+        run: |
+          cargo build
+          bash scripts/e2e-pg.sh
+        env:
+          DBSNAP_BIN: ${{ github.workspace }}/target/debug/dbsnap
+          DBSNAP_TEST_PG_URL: postgres://dbsnap:dbsnap@127.0.0.1:5433/app_admin
 
   test-mysql:
     runs-on: ubuntu-latest
