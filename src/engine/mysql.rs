@@ -1,6 +1,6 @@
 use super::{DatabaseEngine, EngineInfo, RestoreOutcome, SaveOpts, SaveOutcome};
 use crate::config::ServerTarget;
-use crate::storage::{compress, Location, SnapshotRecord, Storage};
+use crate::storage::{compress, Location, SnapshotRecord, Storage, TemporaryFile};
 use crate::util;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -146,6 +146,7 @@ impl MysqlEngine {
                     "--single-transaction",
                     "--routines",
                     "--triggers",
+                    "--events",
                     "--hex-blob",
                     "--no-tablespaces",
                     "--set-gtid-purged=OFF",
@@ -182,7 +183,6 @@ impl MysqlEngine {
                     "--no-tablespaces",
                     "--column-statistics=0",
                 ]),
-                common(&["--single-transaction", "--hex-blob"]),
             ],
         }
     }
@@ -200,9 +200,14 @@ impl MysqlEngine {
         let id = util::new_id(taken_ids);
         let raw_tmp = store.tmp_dir().join(format!("save-{id}.sql"));
         let zst_path = store.snapshots_dir().join(format!("{id}.sql.zst"));
+        let _raw_guard = TemporaryFile::create(raw_tmp.clone())?;
 
         let mut last_err = String::new();
         for flags in self.dump_flag_sets(flavor) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&raw_tmp)?;
             let output = Command::new(&dump_bin)
                 .args(self.base_args())
                 .args(&flags)
@@ -221,9 +226,10 @@ impl MysqlEngine {
                             .unwrap_or(false) =>
                 {
                     // wrap the raw SQL in zstd, hashing the compressed stream
+                    let compressed_guard = TemporaryFile::create(zst_path.clone())?;
                     let (original_bytes, size_bytes, hash) =
                         compress::compress_to(&raw_tmp, &zst_path)?;
-                    std::fs::remove_file(&raw_tmp).ok();
+                    compressed_guard.persist();
                     return Ok(SaveOutcome {
                         record: SnapshotRecord {
                             id: id.clone(),
@@ -250,7 +256,6 @@ impl MysqlEngine {
                     last_err = format!("{e:#}");
                 }
             }
-            std::fs::remove_file(&raw_tmp).ok();
         }
         bail!(
             "{}dump failed with every known flag set for {} {}:\n{last_err}",
@@ -270,7 +275,10 @@ impl MysqlEngine {
     }
 
     fn quote_lit(s: &str) -> String {
-        format!("'{}'", s.replace('\'', "''"))
+        // Hex literals avoid quote/backslash interpretation differences across
+        // MySQL SQL modes, including NO_BACKSLASH_ESCAPES.
+        let hex: String = s.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        format!("CONVERT(0x{hex} USING utf8mb4)")
     }
 }
 
@@ -376,5 +384,41 @@ mod tests {
                     flag.starts_with("--set-gtid-purged") || flag.starts_with("--column-statistics")
                 })
         }));
+    }
+
+    #[test]
+    fn every_dump_fallback_preserves_database_objects() {
+        let engine = MysqlEngine::new(ServerTarget {
+            host: "localhost".into(),
+            port: 3306,
+            user: "test".into(),
+            password: None,
+            database: "app".into(),
+        });
+        for flavor in [Flavor::Mysql, Flavor::Maria] {
+            for flags in engine.dump_flag_sets(flavor) {
+                for required in [
+                    "--single-transaction",
+                    "--routines",
+                    "--triggers",
+                    "--events",
+                    "--hex-blob",
+                    "--databases",
+                ] {
+                    assert!(
+                        flags.iter().any(|flag| flag == required),
+                        "{flavor:?} fallback missing {required}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn database_name_is_encoded_without_sql_syntax() {
+        assert_eq!(
+            MysqlEngine::quote_lit("a\\'b"),
+            "CONVERT(0x615c2762 USING utf8mb4)"
+        );
     }
 }

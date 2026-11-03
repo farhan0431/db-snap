@@ -1,5 +1,7 @@
 use super::{DatabaseEngine, EngineInfo, RestoreOutcome, SaveMethod, SaveOpts, SaveOutcome};
-use crate::storage::{cas, compress, Location, SnapshotRecord, SourceState, Storage};
+use crate::storage::{
+    cas, compress, Location, SnapshotRecord, SourceState, Storage, TemporaryFile,
+};
 use crate::util;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -232,6 +234,7 @@ impl DatabaseEngine for SqliteEngine {
 
         let id = util::new_id(taken_ids);
         let staged = store.tmp_dir().join(format!("save-{id}.db"));
+        let _staged_guard = TemporaryFile::create(staged.clone())?;
 
         // Hot backup through the Online Backup API: page-consistent copy
         // while the dev server keeps running (design §2.1).
@@ -248,7 +251,6 @@ impl DatabaseEngine for SqliteEngine {
         let prev_content_id = previous.filter(|p| p.is_delta()).map(|p| p.blake3.clone());
         match cas::save_delta(store, &staged, &id, prev_content_id.as_deref())? {
             cas::DeltaOutcome::Identical { .. } => {
-                std::fs::remove_file(&staged).ok();
                 let Some(prev) = previous else {
                     bail!("identical content reported without a previous snapshot");
                 };
@@ -273,25 +275,22 @@ impl DatabaseEngine for SqliteEngine {
                 written_bytes,
                 content_id,
                 original_size,
-            } => {
-                std::fs::remove_file(&staged).ok();
-                Ok(SaveOutcome {
-                    record: SnapshotRecord {
-                        id,
-                        tag: tag.to_string(),
-                        created_at: Utc::now(),
-                        engine: "sqlite".to_string(),
-                        location: Location::Manifest { path: manifest_rel },
-                        size_bytes: manifest_size + written_bytes,
-                        original_bytes: original_size,
-                        blake3: content_id,
-                        method: "sqlite-delta".to_string(),
-                        pinned: false,
-                        source_state: current_state,
-                    },
-                    linked: false,
-                })
-            }
+            } => Ok(SaveOutcome {
+                record: SnapshotRecord {
+                    id,
+                    tag: tag.to_string(),
+                    created_at: Utc::now(),
+                    engine: "sqlite".to_string(),
+                    location: Location::Manifest { path: manifest_rel },
+                    size_bytes: manifest_size + written_bytes,
+                    original_bytes: original_size,
+                    blake3: content_id,
+                    method: "sqlite-delta".to_string(),
+                    pinned: false,
+                    source_state: current_state,
+                },
+                linked: false,
+            }),
         }
     }
 

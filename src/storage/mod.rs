@@ -14,6 +14,37 @@ pub mod compress;
 pub const DBSNAP_DIR: &str = ".dbsnap";
 const LOCK_WAIT_MS: u64 = 10_000;
 
+/// A file created by this operation, removed on normal error paths or unwind.
+/// Process termination can still leave it behind; it must not be used to
+/// delete a path which existed before this operation.
+pub struct TemporaryFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TemporaryFile {
+    pub fn create(path: PathBuf) -> Result<Self> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("creating temporary file {}", path.display()))?;
+        Ok(Self { path, armed: true })
+    }
+
+    pub fn persist(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Project binding persisted in config.json (design §3.2).
 pub use crate::config::Fingerprint;
 
@@ -374,6 +405,25 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_file_cleans_up_and_never_claims_existing_files() {
+        let base = std::env::temp_dir().join(format!("dbsnap-temp-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let path = base.join("owned");
+        {
+            let _guard = TemporaryFile::create(path.clone()).unwrap();
+            fs::write(&path, b"partial data").unwrap();
+            assert!(TemporaryFile::create(path.clone()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"partial data");
+        }
+        assert!(!path.exists());
+        let guard = TemporaryFile::create(path.clone()).unwrap();
+        fs::write(&path, b"finished").unwrap();
+        guard.persist();
+        assert_eq!(fs::read(&path).unwrap(), b"finished");
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

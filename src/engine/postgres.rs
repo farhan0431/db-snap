@@ -1,6 +1,6 @@
 use super::{DatabaseEngine, EngineInfo, RestoreOutcome, SaveMethod, SaveOpts, SaveOutcome};
 use crate::config::ServerTarget;
-use crate::storage::{compress, Location, SnapshotRecord, Storage};
+use crate::storage::{compress, Location, SnapshotRecord, Storage, TemporaryFile};
 use crate::util;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -356,6 +356,7 @@ impl PostgresEngine {
         let mut admin = self.maintenance()?;
         Self::require_matching_client(&mut admin, "pg_dump")?;
         let size = Self::db_size(&mut admin, &self.pg.database)?;
+        let _staged_guard = TemporaryFile::create(staged.clone())?;
 
         let mut command = Command::new("pg_dump");
         self.configure_dump_tls(&mut command);
@@ -376,7 +377,16 @@ impl PostgresEngine {
 
         let file_size = std::fs::metadata(&staged)?.len();
         let hash = compress::hash_file(&staged)?;
-        std::fs::rename(&staged, &out_path)?;
+        // Never overwrite an existing artifact, including an orphan left by an
+        // interrupted operation. Both guards clean up on a normal copy error.
+        let output_guard = TemporaryFile::create(out_path.clone())?;
+        {
+            let mut input = std::fs::File::open(&staged)?;
+            let mut output = std::fs::OpenOptions::new().write(true).open(&out_path)?;
+            std::io::copy(&mut input, &mut output)?;
+            output.sync_all()?;
+        }
+        output_guard.persist();
         let rel = format!("snapshots/{id}.dump");
         Ok(SaveOutcome {
             record: SnapshotRecord {

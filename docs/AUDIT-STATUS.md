@@ -27,8 +27,12 @@ disposable databases; dbsnap is not a production backup system.
 | DB-019 Release gate | Release invokes CI and smoke-tests native binaries and the packed npm package. GitHub execution and cross-target packaging still require verification. |
 | DB-020 Documentation claims | Key safety and integrity claims revised. Full documentation consistency review remains. |
 | DB-021 PostgreSQL E2E cleanup | Cleanup uses the configured server and credentials, only drops a test database it created, and is tested on success and failure. The script retains the catalog and warns about remaining server-side snapshot clones. |
-| DB-022 Orphan dumps | PostgreSQL dump writes to staging and cleans normal failure; crashes and other partial artifacts still need safe cleanup. |
+| DB-022 Orphan dumps | PostgreSQL and MySQL dump staging files and partially written output, and SQLite staged backups, are removed on normal errors. Existing dump destinations are not overwritten. Process termination and orphan cleanup after a successful artifact write but failed catalog update remain unresolved. |
 
 Do not tag a release as fully audited or production-ready while the unresolved
 items above remain. In particular, staging MySQL dumps safely requires handling
 database-qualified SQL without redirecting it to the wrong target.
+
+All MySQL/MariaDB dump fallback options now retain routines, triggers, and
+events. If the installed client cannot supply these options, snapshot creation
+fails rather than silently omitting those objects.

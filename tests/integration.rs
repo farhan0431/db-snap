@@ -634,6 +634,11 @@ fn saving_unchanged_database_rejects_corrupt_existing_chunks() -> Result<()> {
     assert!(save(&root, &db, "second").is_err());
     let store = dbsnap::storage::Storage::find(&root).unwrap();
     assert_eq!(store.load_metadata()?.snapshots.len(), 1);
+    assert_eq!(
+        fs::read_dir(store.tmp_dir())?.count(),
+        0,
+        "failed snapshot must remove its staged database"
+    );
     Ok(())
 }
 
@@ -1510,13 +1515,25 @@ fn mysql_snapshot_is_saved_and_unsafe_restore_is_blocked() -> Result<()> {
         Some(&db),
         "DROP TABLE IF EXISTS items;
          CREATE TABLE items (id INT PRIMARY KEY, v TEXT);
-         INSERT INTO items VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');",
+         INSERT INTO items VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');
+         CREATE PROCEDURE audit_proc() SELECT 42;
+         CREATE TRIGGER audit_trigger BEFORE INSERT ON items FOR EACH ROW SET NEW.id = NEW.id;
+         CREATE EVENT audit_event ON SCHEDULE EVERY 1 DAY DO SET @dbsnap_e2e = 1;",
     )?;
 
     init(&root, Path::new(&url))?;
     save(&root, Path::new(&url), "myv1")?;
     let rec = record_by_tag(&root, "myv1");
     assert_eq!(rec.method, "mysql-dump");
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let sql = zstd::stream::decode_all(fs::File::open(store.snapshot_path(&rec)?)?)?;
+    let sql = String::from_utf8_lossy(&sql);
+    for object in ["audit_proc", "audit_trigger", "audit_event"] {
+        assert!(
+            sql.contains(object),
+            "snapshot omitted database object {object}"
+        );
+    }
 
     // migrasi destruktif: kolom v hilang bersama datanya
     my_exec_url(&url, Some(&db), "ALTER TABLE items DROP COLUMN v;")?;
