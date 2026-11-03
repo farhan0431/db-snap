@@ -1,7 +1,7 @@
 {
   "name": "@farhan0431/db-snap",
-  "version": "0.3.13",
-  "description": "Instant physical database time-machine and MCP server for AI coding agents \u00e2\u20ac\u201d git commit/checkout for your local database, powered by Rust.",
+  "version": "0.3.14",
+  "description": "Development database snapshots and MCP server for SQLite, PostgreSQL, and MySQL/MariaDB.",
   "license": "MIT",
   "bin": {
     "dbsnap": "bin/dbsnap.js"

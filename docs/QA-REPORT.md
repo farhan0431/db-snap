@@ -92,4 +92,6 @@ dbsnap retained the recovery journal and pinned snapshot. The helper now uses
 the same client-name fallback as the engine. Explicit Docker storage fixtures
 can be restarted with expanded bounded storage before the test retries recovery;
 the test still requires the original data to be restored. These fixes are
-prepared for `v0.3.13`; the failed tag is not rewritten.
+included in the final `v0.3.14` release; earlier tags are not rewritten.
+The release also pins native macOS jobs to supported macOS 15 images and
+normalizes npm package metadata using explicit UTF-8 encoding.
