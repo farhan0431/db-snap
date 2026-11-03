@@ -1,6 +1,6 @@
 {
   "name": "@farhan0431/db-snap",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Instant physical database time-machine and MCP server for AI coding agents — git commit/checkout for your local database, powered by Rust.",
   "license": "MIT",
   "bin": {
