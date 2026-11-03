@@ -187,7 +187,7 @@ Tokio disempitkan dari `features = ["full"]` menjadi `["rt-multi-thread", "macro
 **Mekanisme:**
 - **Objek store:** `.dbsnap/objects/<hash[0:2]>/<hash>` — tiap chunk 64 KB disimpan ter-zstd, alamatnya blake3-nya sendiri. Snapshot = **manifest** kecil (`.dbsnap/manifests/<id>.m`): header + daftar hash chunk berurutan (DB 1 GB ≈ 16 ribu hash ≈ 512 KB).
 - **Save:** Backup API → file temp → baca sekali sambil blake3 per chunk → **hanya chunk yang belum ada di store yang ditulis** (zstd hanya di chunk baru — CPU kompresi juga turun drastis).
-- **Fast path DB tidak berubah:** `PRAGMA data_version` + ukuran + mtime identik dengan snapshot terakhir → pakai ulang manifest, 0 I/O signifikan.
+- **Dedup DB tidak berubah:** snapshot konsisten selalu dibaca dan dibandingkan berdasarkan isi; manifest dapat dipakai ulang tanpa menulis chunk duplikat. Nilai `data_version` koneksi baru dan mtime file utama tidak dapat membuktikan WAL tidak berubah.
 - **Restore:** kumpulkan chunk sesuai manifest → tulis ke temp sambil **verifikasi hash per chunk** → Backup API ke DB hidup. Verifikasi integritas T3 menjadi gratis (tidak perlu hash file terpisah).
 - **Prune/GC:** refcount antar manifest; objek yang tidak lagi dirujuk snapshot mana pun dihapus. Prune tetap hanya menyentuh objek milik dbsnap (T13).
 

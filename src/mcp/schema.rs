@@ -13,11 +13,10 @@ pub fn tools() -> Value {
                     "tag": {
                         "type": "string",
                         "maxLength": 64,
-                        "pattern": "^[A-Za-z0-9._-]+$",
-                        "description": "Short label describing what comes next, e.g. 'before-auth-migration'."
+                        "pattern": "^[A-Za-z0-9._ -]+$",
+                        "description": "Optional label describing what comes next; defaults to a timestamp."
                     }
                 },
-                "required": ["tag"],
                 "additionalProperties": false
             }
         },
@@ -41,6 +40,16 @@ pub fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "dbsnap_prune",
+            "description": "Permanently delete older recorded snapshots, retaining at least the requested number of newest snapshots. Use only when the user requests cleanup.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "keep": { "type": "integer", "minimum": 1, "description": "Number of newest snapshots to retain." } },
+                "required": ["keep"],
                 "additionalProperties": false
             }
         },

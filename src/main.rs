@@ -56,8 +56,21 @@ fn run(command: Command) -> i32 {
             force,
             allow_remote,
         ),
-        Command::List { db } => ops::list_at(&root, db.as_deref()),
-        Command::Status { db } => ops::status_at(&root, db.as_deref()),
+        Command::List { db, json } => {
+            if json {
+                ops::list_json_at(&root, db.as_deref())
+            } else {
+                ops::list_at(&root, db.as_deref())
+            }
+        }
+        Command::Status { db, json } => {
+            if json {
+                ops::status_json_at(&root, db.as_deref())
+            } else {
+                ops::status_at(&root, db.as_deref())
+            }
+        }
+        Command::Diff { from, to, db } => ops::diff_at(&root, db.as_deref(), &from, &to),
         Command::Prune { keep, all, db } => {
             ops::prune_at(&root, db.as_deref(), if all { 0 } else { keep })
         }

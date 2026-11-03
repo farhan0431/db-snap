@@ -22,6 +22,95 @@ impl SqliteEngine {
         Self { path }
     }
 
+    /// Compare verified SQLite snapshots without opening or changing the live database.
+    pub fn diff(
+        &self,
+        store: &Storage,
+        left: &SnapshotRecord,
+        right: &SnapshotRecord,
+    ) -> Result<String> {
+        use std::collections::BTreeMap;
+        type SchemaObjects = BTreeMap<(String, String), (String, Option<i64>)>;
+        fn inspect(path: &Path) -> Result<SchemaObjects> {
+            let conn =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let mut statement = conn.prepare("SELECT type, name, COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND type IN ('table','index','view','trigger') ORDER BY type, name")?;
+            let entries = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut result = BTreeMap::new();
+            for entry in entries {
+                let (kind, name, sql) = entry?;
+                let count = if kind == "table" {
+                    let identifier = format!("\"{}\"", name.replace('"', "\"\""));
+                    Some(conn.query_row(
+                        &format!("SELECT COUNT(*) FROM {identifier}"),
+                        [],
+                        |row| row.get(0),
+                    )?)
+                } else {
+                    None
+                };
+                result.insert((kind, name), (sql, count));
+            }
+            Ok(result)
+        }
+        let left_path = self.stage(store, left)?;
+        let right_path = match self.stage(store, right) {
+            Ok(path) => path,
+            Err(e) => {
+                std::fs::remove_file(&left_path).ok();
+                return Err(e);
+            }
+        };
+        let result = (|| {
+            let a = inspect(&left_path)?;
+            let b = inspect(&right_path)?;
+            let mut changes = Vec::new();
+            for (key, old) in &a {
+                match b.get(key) {
+                    None => changes.push(format!("removed {} {}", key.0, key.1)),
+                    Some(new) => {
+                        if old.0 != new.0 {
+                            changes.push(format!("changed schema {} {}", key.0, key.1));
+                        }
+                        if old.1 != new.1 {
+                            changes.push(format!(
+                                "table {} rows: {} -> {}",
+                                key.1,
+                                old.1.unwrap_or(0),
+                                new.1.unwrap_or(0)
+                            ));
+                        }
+                    }
+                }
+            }
+            for key in b.keys() {
+                if !a.contains_key(key) {
+                    changes.push(format!("added {} {}", key.0, key.1));
+                }
+            }
+            if changes.is_empty() {
+                Ok(
+                    "no schema or table row-count differences (row contents are not compared)"
+                        .to_string(),
+                )
+            } else {
+                Ok(format!(
+                    "{}\n(row contents are not compared)",
+                    changes.join("\n")
+                ))
+            }
+        })();
+        std::fs::remove_file(&left_path).ok();
+        std::fs::remove_file(&right_path).ok();
+        result
+    }
+
     fn open_live(&self) -> Result<Connection> {
         let conn = Connection::open(&self.path)
             .with_context(|| format!("opening database {}", self.path.display()))?;
@@ -126,26 +215,9 @@ impl DatabaseEngine for SqliteEngine {
             );
         }
 
-        // Fast path: the source is provably untouched since the previous
-        // snapshot (data_version + size + mtime all equal) — link it.
+        // Always read a consistent backup: a new connection's data_version
+        // and the main file's mtime cannot prove the WAL has not changed.
         let current_state = self.source_state();
-        if let (Some(prev), Some(state)) = (previous, current_state.as_ref()) {
-            if let Some(prev_state) = &prev.source_state {
-                if prev_state.data_version == state.data_version
-                    && prev_state.size_bytes == state.size_bytes
-                    && prev_state.mtime_ms == state.mtime_ms
-                {
-                    let mut record = prev.clone();
-                    record.id = util::new_id(taken_ids);
-                    record.tag = tag.to_string();
-                    record.created_at = Utc::now();
-                    return Ok(SaveOutcome {
-                        record,
-                        linked: true,
-                    });
-                }
-            }
-        }
 
         let free = store.free_bytes()?;
         if free < MIN_FREE_BYTES {
@@ -244,10 +316,8 @@ impl DatabaseEngine for SqliteEngine {
                     safety = Some(outcome.record);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "warning: {}",
-                        crate::util::mask(&format!("pre-restore safety snapshot failed: {e:#}"))
-                    );
+                    std::fs::remove_file(&staged).ok();
+                    bail!("pre-restore safety snapshot failed; restore aborted: {e:#}");
                 }
             }
         }

@@ -81,9 +81,9 @@ Same JSON as Cursor (Settings → Developer → Edit Config).
 
 ## Step 3 — verify
 
-Restart the client, then check the four tools appear:
+Restart the client, then check the five tools appear:
 `dbsnap_status`, `dbsnap_create_snapshot`, `dbsnap_restore_snapshot`,
-`dbsnap_list_snapshots`. Call `dbsnap_status` once — it prints which local
+`dbsnap_list_snapshots`, `dbsnap_prune`. Call `dbsnap_status` once — it prints which local
 database is protected.
 
 > Security note: the MCP server is hard-wired **local-only**. It cannot

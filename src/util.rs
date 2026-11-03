@@ -115,9 +115,9 @@ pub fn validate_tag(tag: &str) -> Result<()> {
     }
     if !tag
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '))
     {
-        bail!("tag may only contain letters, digits, '.', '_' and '-' (got: {tag:?})");
+        bail!("tag may only contain letters, digits, spaces, '.', '_' and '-' (got: {tag:?})");
     }
     Ok(())
 }
@@ -174,7 +174,7 @@ mod tests {
         assert!(validate_tag("before-migration_2").is_ok());
         assert!(validate_tag("v1.0").is_ok());
         assert!(validate_tag("").is_err());
-        assert!(validate_tag("with space").is_err());
+        assert!(validate_tag("with space").is_ok());
         assert!(validate_tag("../escape").is_err());
         assert!(validate_tag(&"x".repeat(65)).is_err());
     }

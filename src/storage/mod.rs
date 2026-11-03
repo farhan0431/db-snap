@@ -129,7 +129,7 @@ impl Metadata {
             ),
             1 => Ok(matches[0].clone()),
             _ => bail!(
-                "{:?} matches multiple snapshots ({}). Use a longer id prefix.",
+                "{:?} matches multiple snapshots ({}). Use an unambiguous snapshot ID.",
                 query,
                 matches
                     .iter()

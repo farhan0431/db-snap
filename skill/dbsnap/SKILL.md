@@ -31,6 +31,7 @@ template clones, ~1 s with a brief connection blackout), and MySQL/MariaDB
 | Tool | Arguments | Use |
 | :--- | :--- | :--- |
 | `dbsnap_status` | — | Show bound database, engine, snapshot count, disk usage. |
+| `dbsnap_prune` | `keep` (positive integer) | Delete older snapshots only when the user requests cleanup. |
 | `dbsnap_create_snapshot` | `tag` (required, `[A-Za-z0-9._-]`) | Save a snapshot. Call before migrations/DDL/bulk changes. |
 | `dbsnap_restore_snapshot` | `tag_or_id` (optional; omit = latest) | Restore. Immediately after failure; also to undo an experiment. |
 | `dbsnap_list_snapshots` | — | List restore points (id, tag, time, size). |

@@ -107,6 +107,200 @@ fn first_object(root: &Path) -> PathBuf {
 }
 
 #[test]
+fn failed_safety_snapshot_aborts_sqlite_restore() -> Result<()> {
+    use dbsnap::engine::{sqlite::SqliteEngine, DatabaseEngine};
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 2);
+    init(&root, &db)?;
+    save(&root, &db, "seed")?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let record = record_by_tag(&root, "seed");
+    fs::rename(&db, root.join("original.db"))?;
+    fs::create_dir(&db)?;
+    let error = SqliteEngine::new(db.clone())
+        .restore(&store, &record, Some("auto-before-restore-test"))
+        .err()
+        .expect("a failed safety snapshot must abort restore");
+    assert!(format!("{error:#}").contains("safety snapshot failed"));
+    assert!(db.is_dir(), "restore must not replace the live target");
+    assert_eq!(count_rows(&root.join("original.db")), 2);
+    Ok(())
+}
+
+#[test]
+fn commands_find_project_database_from_subdirectory() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("prisma/dev.db");
+    create_db(&db, 3);
+    init(&root, &db)?;
+    let nested = root.join("src/controllers");
+    fs::create_dir_all(&nested)?;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&nested)
+        .env_remove("DATABASE_URL")
+        .arg("status")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("SQLite"));
+    Ok(())
+}
+
+#[test]
+fn json_commands_and_duplicate_tags() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 3);
+    init(&root, &db)?;
+    save(&root, &db, "before migration")?;
+    save(&root, &db, "before migration")?;
+    let error = restore(&root, &db, Some("before migration"), false).unwrap_err();
+    assert!(error.to_string().contains("unambiguous snapshot ID"));
+    let list: serde_json::Value = serde_json::from_str(&ops::list_json_at(&root, db.to_str())?)?;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let status: serde_json::Value =
+        serde_json::from_str(&ops::status_json_at(&root, db.to_str())?)?;
+    assert_eq!(status["engine"], "sqlite");
+    assert_eq!(status["snapshot_count"], 2);
+    Ok(())
+}
+
+#[test]
+fn mcp_snapshot_accepts_missing_tag() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 2);
+    let ctx = ops::context_at(&root, db.to_str(), false, false)?;
+    let response = dbsnap::mcp::handler::handle(
+        &ctx,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "dbsnap_create_snapshot", "arguments": {} }
+        }),
+    )
+    .unwrap();
+    assert_eq!(response["result"]["isError"], false);
+    assert!(response.to_string().contains("snap-"));
+    Ok(())
+}
+
+#[test]
+fn sqlite_snapshot_includes_uncheckpointed_wal_changes() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    let writer = Connection::open(&db)?;
+    writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")?;
+    init(&root, &db)?;
+    save(&root, &db, "before")?;
+    writer.execute("INSERT INTO users (name) VALUES ('new')", [])?;
+    save(&root, &db, "after")?;
+    writer.execute("DELETE FROM users WHERE name='new'", [])?;
+    restore(&root, &db, Some("after"), false)?;
+    assert_eq!(count_rows(&db), 2);
+    Ok(())
+}
+
+#[test]
+fn mcp_prune_rejects_zero_and_keeps_requested_snapshots() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 2);
+    let ctx = ops::context_at(&root, db.to_str(), false, false)?;
+    ops::save_with(&ctx, Some("one".into()), SaveMethod::Clone)?;
+    ops::save_with(&ctx, Some("two".into()), SaveMethod::Clone)?;
+    let call = |keep| {
+        dbsnap::mcp::handler::handle(
+            &ctx,
+            &serde_json::json!({
+                "jsonrpc":"2.0", "id":1, "method":"tools/call",
+                "params":{"name":"dbsnap_prune", "arguments":{"keep":keep}}
+            }),
+        )
+        .unwrap()
+    };
+    assert_eq!(call(0)["result"]["isError"], true);
+    assert_eq!(ctx.store.load_metadata()?.snapshots.len(), 2);
+    assert_eq!(call(1)["result"]["isError"], false);
+    assert_eq!(ctx.store.load_metadata()?.snapshots.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn prune_aborts_when_surviving_manifest_is_unreadable() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "old")?;
+    add_rows(&db, 1, 4);
+    save(&root, &db, "new")?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let old = record_by_tag(&root, "old");
+    let new = record_by_tag(&root, "new");
+    fs::write(store.snapshot_path(&new)?, b"broken")?;
+    let unrelated = store.tmp_dir().join("unrelated.txt");
+    fs::write(&unrelated, b"keep")?;
+    let error = ops::prune_at(&root, db.to_str(), 1).unwrap_err();
+    assert!(error.to_string().contains("cannot safely prune"));
+    assert!(store.snapshot_path(&old)?.exists());
+    assert!(unrelated.exists());
+    assert_eq!(store.load_metadata()?.snapshots.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn save_waits_for_project_lock() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    let ctx = ops::context_at(&root, db.to_str(), false, false)?;
+    let lock = ctx.store.lock()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        tx.send(ops::save_with(
+            &ctx,
+            Some("locked".into()),
+            SaveMethod::Clone,
+        ))
+        .unwrap();
+    });
+    match rx.recv_timeout(std::time::Duration::from_millis(300)) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            drop(lock);
+            rx.recv_timeout(std::time::Duration::from_secs(5))??;
+        }
+        Ok(Err(_)) => drop(lock), // Some platforms reject a second lock immediately.
+        other => panic!("save must not succeed while the lock is held: {other:?}"),
+    }
+    worker.join().unwrap();
+    Ok(())
+}
+
+#[test]
+fn sqlite_diff_compares_schema_and_row_counts_without_changing_live_data() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "before")?;
+    add_rows(&db, 1, 3);
+    Connection::open(&db)?.execute_batch("CREATE TABLE projects (id INTEGER PRIMARY KEY);")?;
+    save(&root, &db, "after")?;
+    let diff = ops::diff_at(&root, db.to_str(), "before", "after")?;
+    assert!(diff.contains("table users rows: 1 -> 3"), "{diff}");
+    assert!(diff.contains("added table projects"), "{diff}");
+    assert!(diff.contains("row contents are not compared"));
+    assert_eq!(count_rows(&db), 3);
+    Ok(())
+}
+
+#[test]
 fn save_restore_cycle() -> Result<()> {
     let root = temp_root();
     let db = root.join("prisma/dev.db");

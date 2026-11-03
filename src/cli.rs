@@ -73,9 +73,24 @@ pub enum Command {
     List {
         #[arg(long)]
         db: Option<String>,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show binding, engine info and snapshot storage usage
     Status {
+        #[arg(long)]
+        db: Option<String>,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare schema and row counts between two SQLite snapshots
+    Diff {
+        /// Older snapshot ID or tag
+        from: String,
+        /// Newer snapshot ID or tag
+        to: String,
         #[arg(long)]
         db: Option<String>,
     },

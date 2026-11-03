@@ -32,21 +32,27 @@ pub fn context_at(
     force: bool,
     allow_remote: bool,
 ) -> Result<Ctx> {
-    let db = config::resolve(explicit, allow_remote)?;
+    let existing = Storage::find(root);
+    let project_root = existing
+        .as_ref()
+        .and_then(|s| s.root.parent())
+        .unwrap_or(root)
+        .to_path_buf();
+    let db = config::resolve_at(&project_root, explicit, allow_remote)?;
     let fingerprint = db.fingerprint();
-    if let Some(store) = Storage::find(root) {
+    if let Some(store) = existing {
         let bound = store.load_config()?;
         if bound != fingerprint {
             if !force {
                 bail!(
-                    "this project is bound to {} ({}), but the target database is {} ({})\nre-run `dbsnap init` to re-bind, or pass --force",
+                    "this project is bound to {} ({}), but the target database is {} ({})\ncheck the target; to re-bind, run `dbsnap init` with the intended database. `save` and `restore` also support --force",
                     bound.engine,
                     bound.target,
                     fingerprint.engine,
                     fingerprint.target
                 );
             }
-            let store = Storage::create(root, &fingerprint)?;
+            let store = Storage::create(&project_root, &fingerprint)?;
             return Ok(Ctx { db, store });
         }
         Ok(Ctx { db, store })
@@ -68,10 +74,15 @@ fn redact(result: Result<String>) -> Result<String> {
 
 pub fn init_at(root: &Path, explicit: Option<&str>, allow_remote: bool) -> Result<String> {
     redact((|| {
-        let db = config::resolve(explicit, allow_remote)?;
+        let existing = Storage::find(root);
+        let project_root = existing
+            .as_ref()
+            .and_then(|s| s.root.parent())
+            .unwrap_or(root);
+        let db = config::resolve_at(project_root, explicit, allow_remote)?;
         let fingerprint = db.fingerprint();
-        let existed = Storage::find(root).is_some();
-        let store = Storage::create(root, &fingerprint)?;
+        let existed = existing.is_some();
+        let store = Storage::create(project_root, &fingerprint)?;
 
         let mut msg = if existed {
             "re-bound project database".to_string()
@@ -104,7 +115,7 @@ pub fn init_at(root: &Path, explicit: Option<&str>, allow_remote: bool) -> Resul
         msg.push_str("\n  git      : .dbsnap/ registered in .gitignore");
 
         // Install the agent skill so AI editors pick up the workflow automatically.
-        let skill_path = root
+        let skill_path = project_root
             .join(".agents")
             .join("skills")
             .join("dbsnap")
@@ -139,6 +150,7 @@ pub fn save_at(
 }
 
 pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> Result<String> {
+    let _lock = ctx.store.lock()?;
     let tag = match tag {
         Some(t) => {
             util::validate_tag(&t)?;
@@ -199,6 +211,7 @@ pub fn restore_at(
 }
 
 pub fn restore_with(ctx: &Ctx, id_or_tag: Option<String>, safety: bool) -> Result<String> {
+    let _lock = ctx.store.lock()?;
     let meta = ctx.store.load_metadata()?;
     let record = meta.find(id_or_tag.as_deref())?;
     if record.engine != ctx.db.engine.to_string() {
@@ -263,7 +276,7 @@ fn prune_auto_snapshots(
     let victims: Vec<SnapshotRecord> = autos.split_off(AUTO_SAFETY_KEEP);
     meta.snapshots
         .retain(|s| !victims.iter().any(|v| v.id == s.id));
-    remove_records(store, meta, &victims, pg);
+    remove_records(store, meta, &victims, pg)?;
     Ok(())
 }
 
@@ -275,7 +288,7 @@ fn remove_records(
     survivors: &Metadata,
     victims: &[SnapshotRecord],
     pg: Option<&ServerTarget>,
-) -> (usize, u64) {
+) -> Result<(usize, u64)> {
     let survivor_files: HashSet<&str> = survivors
         .snapshots
         .iter()
@@ -294,9 +307,12 @@ fn remove_records(
             crate::storage::Location::Manifest { path } => {
                 survivor_manifests.insert(path.as_str());
                 if needs_manifest_scan {
-                    if let Ok(m) = store.read_manifest_file(path) {
-                        survivor_chunks.extend(m.hexes());
-                    }
+                    let m = store.read_manifest_file(path).map_err(|e| {
+                        anyhow::anyhow!(
+                            "cannot safely prune: survivor manifest {path} cannot be read: {e:#}"
+                        )
+                    })?;
+                    survivor_chunks.extend(m.hexes());
                 }
             }
             crate::storage::Location::PgDatabase { name } => {
@@ -354,7 +370,7 @@ fn remove_records(
         }
         removed += 1;
     }
-    (removed, freed)
+    Ok((removed, freed))
 }
 
 pub fn list_at(root: &Path, explicit: Option<&str>) -> Result<String> {
@@ -364,7 +380,34 @@ pub fn list_at(root: &Path, explicit: Option<&str>) -> Result<String> {
     })())
 }
 
+pub fn diff_at(root: &Path, explicit: Option<&str>, from: &str, to: &str) -> Result<String> {
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        let meta = ctx.store.load_metadata()?;
+        let left = meta.find(Some(from))?;
+        let right = meta.find(Some(to))?;
+        match &ctx.db.target {
+            DbTarget::Sqlite(path) if left.engine == "sqlite" && right.engine == "sqlite" => {
+                engine::sqlite::SqliteEngine::new(path.clone()).diff(&ctx.store, &left, &right)
+            }
+            _ => bail!("snapshot diff currently supports SQLite snapshots only"),
+        }
+    })())
+}
+
+pub fn list_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        let mut snapshots = ctx.store.load_metadata()?.snapshots;
+        snapshots.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        Ok(serde_json::to_string(&snapshots)?)
+    })())
+}
+
 pub fn list_with(ctx: &Ctx) -> Result<String> {
+    let _lock = ctx.store.lock()?;
     let meta = ctx.store.load_metadata()?;
     if meta.snapshots.is_empty() {
         return Ok("no snapshots yet — create one with: dbsnap save \"my-tag\"".to_string());
@@ -427,6 +470,7 @@ pub fn prune_at(root: &Path, explicit: Option<&str>, keep: usize) -> Result<Stri
 }
 
 pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
+    let _lock = ctx.store.lock()?;
     let mut meta = ctx.store.load_metadata()?;
     meta.snapshots
         .sort_by_key(|a| std::cmp::Reverse(a.created_at));
@@ -435,16 +479,15 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
     let mut removed = 0usize;
     if keep < meta.snapshots.len() {
         let victims: Vec<SnapshotRecord> = meta.snapshots.split_off(keep);
-        let (n, f) = remove_records(&ctx.store, &meta, &victims, pg_target(&ctx.db));
+        let (n, f) = remove_records(&ctx.store, &meta, &victims, pg_target(&ctx.db))?;
         removed = n;
         freed = f;
     }
-    clean_tmp(&ctx.store);
     ctx.store.write_metadata(&meta)?;
 
     if removed == 0 {
         Ok(format!(
-            "nothing to prune — {} snapshots kept, tmp cleaned",
+            "nothing to prune — {} snapshots kept",
             meta.snapshots.len()
         ))
     } else {
@@ -463,7 +506,28 @@ pub fn status_at(root: &Path, explicit: Option<&str>) -> Result<String> {
     })())
 }
 
+pub fn status_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        let info = engine::make(&ctx.db)?.probe()?;
+        let meta = ctx.store.load_metadata()?;
+        let (chunks, chunk_bytes) = scan_dir_size(&ctx.store.objects_dir());
+        Ok(serde_json::to_string(&serde_json::json!({
+            "engine": ctx.db.engine.to_string(),
+            "database": ctx.db.display(),
+            "engine_detail": info.detail,
+            "database_size_bytes": info.size_bytes,
+            "snapshot_count": meta.snapshots.len(),
+            "chunk_count": chunks,
+            "chunk_bytes": chunk_bytes,
+            "disk_free_bytes": ctx.store.free_bytes().ok(),
+        }))?)
+    })())
+}
+
 pub fn status_with(ctx: &Ctx) -> Result<String> {
+    let _lock = ctx.store.lock()?;
     let meta = ctx.store.load_metadata()?;
     let engine = engine::make(&ctx.db)?;
     let info = engine.probe()?;
@@ -527,14 +591,4 @@ fn scan_dir_size(dir: &Path) -> (usize, u64) {
         }
     }
     (count, total)
-}
-
-fn clean_tmp(store: &Storage) {
-    if let Ok(rd) = fs::read_dir(store.tmp_dir()) {
-        for entry in rd.flatten() {
-            if entry.path().is_file() {
-                fs::remove_file(entry.path()).ok();
-            }
-        }
-    }
 }

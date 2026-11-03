@@ -112,7 +112,13 @@ dbsnap restore "before-migration"
 dbsnap rollback                 # restore the most recent snapshot
 dbsnap prune --keep 5           # keep only the 5 newest
 dbsnap status                   # binding, engine info, disk usage
+dbsnap list --json              # machine-readable snapshot catalog
+dbsnap status --json            # machine-readable database status
+dbsnap diff before after        # SQLite schema and table row counts
 ```
+
+`diff` currently supports SQLite snapshots; it does not compare individual row contents.
+When a safety snapshot is enabled, restore stops if it cannot be created.
 
 `dbsnap` resolves your database in this order: `--db` flag → `DATABASE_URL`
 from `.env` → common paths (`prisma/dev.db`, `dev.db`, `*.sqlite`, …).
@@ -145,13 +151,14 @@ Add to your MCP config (`.cursor/mcp.json`, Claude Desktop, Windsurf, …):
 
 or without a global install: `"command": "npx", "args": ["-y", "@farhan0431/db-snap", "mcp"]`.
 
-The agent gets four tools:
+The agent gets five tools:
 
 | Tool | What it tells the agent |
 | :--- | :--- |
 | `dbsnap_create_snapshot` | **MUST be called before** any migration, DDL, or bulk data change. |
 | `dbsnap_restore_snapshot` | Call **immediately** when a migration fails or data looks wrong. Current state is kept as a safety snapshot first. |
 | `dbsnap_list_snapshots` | Show available restore points. |
+| `dbsnap_prune` | Remove older snapshots, retaining at least one, when requested by the user. |
 | `dbsnap_status` | Show which database is protected before touching anything. |
 
 ### Agent skill (automatic)
@@ -234,7 +241,7 @@ machine:
 
 | Scenario | Result |
 | :--- | :--- |
-| SQLite snapshot (100 MB, unchanged DB) | linked, **0 I/O** (`PRAGMA data_version` short-circuit) |
+| SQLite snapshot (100 MB, unchanged DB) | content is checked and linked without writing duplicate chunks |
 | SQLite snapshot (1.6 MB DB, one 8 KB row changed) | **46.9 KB** written (13.7× smaller than full copy) |
 | SQLite restore under a live WAL writer | data verified restored; server kept writing through the whole episode |
 | PostgreSQL `DROP COLUMN` → rollback | 50 rows + column verified back bit-for-bit via `psql` |

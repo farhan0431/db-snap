@@ -95,17 +95,32 @@ pub struct Fingerprint {
 /// `allow_remote` is the explicit human-only override (design §4-T1); MCP
 /// mode always passes false.
 pub fn resolve(explicit: Option<&str>, allow_remote: bool) -> Result<ResolvedDb> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    resolve_at(&root, explicit, allow_remote)
+}
+
+pub fn resolve_at(
+    root: &std::path::Path,
+    explicit: Option<&str>,
+    allow_remote: bool,
+) -> Result<ResolvedDb> {
     if let Some(v) = explicit {
         return parse_db_string(v, allow_remote);
     }
-    dotenvy::dotenv().ok();
     if let Ok(v) = std::env::var("DATABASE_URL") {
         let v = v.trim();
         if !v.is_empty() {
-            return parse_db_string(v, allow_remote);
+            return parse_db_string_at(v, allow_remote, root);
         }
     }
-    auto_detect()
+    if let Ok(vars) = dotenvy::from_path_iter(root.join(".env")) {
+        for (key, value) in vars.flatten() {
+            if key == "DATABASE_URL" && !value.trim().is_empty() {
+                return parse_db_string_at(value.trim(), allow_remote, root);
+            }
+        }
+    }
+    auto_detect(root)
 }
 
 fn sqlite_from(path: PathBuf) -> Result<ResolvedDb> {
@@ -131,6 +146,11 @@ fn sqlite_from(path: PathBuf) -> Result<ResolvedDb> {
 }
 
 pub fn parse_db_string(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    parse_db_string_at(raw, allow_remote, &root)
+}
+
+fn parse_db_string_at(raw: &str, allow_remote: bool, root: &std::path::Path) -> Result<ResolvedDb> {
     let raw = raw.trim();
     if raw.is_empty() {
         bail!("database value is empty");
@@ -147,7 +167,7 @@ pub fn parse_db_string(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
                 let rest = raw.split_once(':').unwrap().1;
                 let rest = rest.trim_start_matches("//");
                 let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-                return sqlite_from(PathBuf::from(percent_decode(rest)));
+                return sqlite_from(root.join(percent_decode(rest)));
             }
             "postgres" | "postgresql" => return server_from(raw, allow_remote, Engine::Postgres),
             "mysql" | "mariadb" => return server_from(raw, allow_remote, Engine::Mysql),
@@ -157,7 +177,7 @@ pub fn parse_db_string(raw: &str, allow_remote: bool) -> Result<ResolvedDb> {
         }
     }
 
-    sqlite_from(PathBuf::from(raw))
+    sqlite_from(root.join(raw))
 }
 
 fn server_from(raw: &str, allow_remote: bool, engine: Engine) -> Result<ResolvedDb> {
@@ -239,8 +259,7 @@ const KNOWN_PATHS: &[&str] = &[
     "app.db",
 ];
 
-fn auto_detect() -> Result<ResolvedDb> {
-    let cwd = std::env::current_dir().context("cannot determine current directory")?;
+fn auto_detect(cwd: &std::path::Path) -> Result<ResolvedDb> {
     for known in KNOWN_PATHS {
         let p = cwd.join(known);
         if p.is_file() {
@@ -248,7 +267,7 @@ fn auto_detect() -> Result<ResolvedDb> {
         }
     }
     // Fall back to any *.sqlite / *.sqlite3 in the current directory.
-    let mut found: Vec<PathBuf> = std::fs::read_dir(&cwd)?
+    let mut found: Vec<PathBuf> = std::fs::read_dir(cwd)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.is_file()

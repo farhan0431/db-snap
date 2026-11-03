@@ -50,20 +50,34 @@ fn tools_call(ctx: &Ctx, params: Option<&Value>) -> Result<Value, (i64, String)>
 
     let tool_result: Result<String, anyhow::Error> = match name.as_str() {
         "dbsnap_create_snapshot" => {
-            let Some(tag) = args["tag"].as_str().map(str::to_string) else {
-                return Ok(error_result("missing required argument: tag (string)"));
+            let tag = match args.get("tag") {
+                None => None,
+                Some(value) => match value.as_str() {
+                    Some(tag) => Some(tag.to_string()),
+                    None => return Ok(error_result("tag must be a string")),
+                },
             };
-            ops::save_with(ctx, Some(tag), crate::engine::SaveMethod::Clone)
+            ops::save_with(ctx, tag, crate::engine::SaveMethod::Clone)
         }
         "dbsnap_restore_snapshot" => {
             let id = args["tag_or_id"].as_str().map(str::to_string);
             ops::restore_with(ctx, id, true)
         }
         "dbsnap_list_snapshots" => ops::list_with(ctx),
+        "dbsnap_prune" => {
+            let Some(keep) = args["keep"]
+                .as_u64()
+                .and_then(|v| usize::try_from(v).ok())
+                .filter(|v| *v > 0)
+            else {
+                return Ok(error_result("keep must be a positive integer"));
+            };
+            ops::prune_with(ctx, keep)
+        }
         "dbsnap_status" => ops::status_with(ctx),
         other => {
             return Ok(error_result(&format!(
-                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_status"
+                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_prune, dbsnap_status"
             )));
         }
     };

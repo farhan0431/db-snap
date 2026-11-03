@@ -301,10 +301,8 @@ impl MysqlEngine {
                     safety = Some(outcome.record);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "warning: {}",
-                        crate::util::mask(&format!("pre-restore safety snapshot failed: {e:#}"))
-                    );
+                    std::fs::remove_file(&sql_tmp).ok();
+                    bail!("pre-restore safety snapshot failed; restore aborted: {e:#}");
                 }
             }
         }
