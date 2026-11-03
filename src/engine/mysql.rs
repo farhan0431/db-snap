@@ -162,6 +162,17 @@ impl MysqlEngine {
                     "--hex-blob",
                     "--no-tablespaces",
                 ]),
+                // MySQL 8's mysqldump queries COLUMN_STATISTICS by default,
+                // but that table does not exist on MariaDB servers.
+                common(&[
+                    "--single-transaction",
+                    "--routines",
+                    "--triggers",
+                    "--events",
+                    "--hex-blob",
+                    "--no-tablespaces",
+                    "--column-statistics=0",
+                ]),
                 common(&["--single-transaction", "--hex-blob"]),
             ],
         }
@@ -404,5 +415,35 @@ impl DatabaseEngine for MysqlEngine {
             );
         }
         self.restore_dump(store, record, safety_tag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mariadb_fallback_supports_mysql_dump_without_losing_objects() {
+        let engine = MysqlEngine::new(ServerTarget {
+            host: "localhost".into(),
+            port: 3306,
+            user: "test".into(),
+            password: None,
+            database: "app".into(),
+        });
+        let flags = engine.dump_flag_sets(Flavor::Maria);
+        assert!(flags.iter().any(|set| {
+            [
+                "--column-statistics=0",
+                "--single-transaction",
+                "--routines",
+                "--triggers",
+                "--events",
+                "--databases",
+                "app",
+            ]
+            .iter()
+            .all(|flag| set.iter().any(|value| value == flag))
+        }));
     }
 }
