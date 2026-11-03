@@ -33,7 +33,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             npm_name: db-snap-darwin-arm64
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             npm_name: db-snap-darwin-x64
           - os: windows-latest
