@@ -41,14 +41,9 @@ impl ServerTarget {
     /// libpq-style connstring for spawned clients — no password field; the
     /// password travels via PGPASSWORD env instead (design §4-T10).
     pub fn connstring(&self) -> String {
-        let host = if self.host.eq_ignore_ascii_case("localhost") {
-            "127.0.0.1"
-        } else {
-            &self.host
-        };
         format!(
             "host={} port={} user={} dbname={}",
-            host, self.port, self.user, self.database
+            self.host, self.port, self.user, self.database
         )
     }
 }
@@ -380,7 +375,7 @@ mod tests {
         assert!(!db.fingerprint().target.contains("secret"));
         assert_eq!(
             pg.connstring(),
-            "host=127.0.0.1 port=5433 user=dev dbname=app_dev"
+            "host=localhost port=5433 user=dev dbname=app_dev"
         );
     }
 

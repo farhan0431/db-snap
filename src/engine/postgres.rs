@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use postgres::NoTls;
 use std::collections::HashSet;
+use std::io::Write;
 use std::process::Command;
 
 /// Prefix reserved for dbsnap-managed databases (design §2.2 rule 1) —
@@ -18,6 +19,60 @@ pub struct PostgresEngine {
 }
 
 impl PostgresEngine {
+    fn restore_failpoint(name: &str) {
+        if std::env::var("DBSNAP_TEST_FAILPOINT").as_deref() == Ok(name) {
+            std::process::exit(86);
+        }
+    }
+    fn journal_path(store: &Storage) -> std::path::PathBuf {
+        store.root.join("postgres-restore.json")
+    }
+
+    fn write_restore_journal(&self, store: &Storage, previous: &str) -> Result<()> {
+        let path = Self::journal_path(store);
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+            .context("a PostgreSQL restore journal already exists or cannot be created; resolve it before another restore")?;
+        let data = serde_json::json!({"version":1,"target":self.pg.display(),"previous":previous});
+        file.write_all(serde_json::to_string(&data)?.as_bytes())?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        std::fs::File::open(&store.root)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Recover only an unambiguous interrupted rename. Never drop a database
+    /// or overwrite an existing target while interpreting the journal.
+    pub fn recover_interrupted(&self, store: &Storage) -> Result<()> {
+        let path = Self::journal_path(store);
+        if !path.exists() {
+            return Ok(());
+        }
+        let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)
+            .context("invalid PostgreSQL restore journal; manual recovery required")?;
+        let previous = journal["previous"].as_str().unwrap_or("");
+        let suffix = previous.strip_prefix("__dbsnap_previous_").unwrap_or("");
+        if journal["version"] != 1
+            || journal["target"].as_str() != Some(self.pg.display().as_str())
+            || suffix.len() != 6
+            || !suffix.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            bail!("invalid or mismatched PostgreSQL restore journal; manual recovery required");
+        }
+        let mut admin = self.maintenance()?;
+        let target_exists = Self::db_exists(&mut admin, &self.pg.database)?;
+        let previous_exists = Self::db_exists(&mut admin, previous)?;
+        match (target_exists, previous_exists) {
+            (false, true) => {
+                admin.execute(&format!("ALTER DATABASE {} RENAME TO {}", Self::quote_ident(previous), Self::quote_ident(&self.pg.database)), &[])?;
+                Self::unfence(&mut admin, &self.pg.database)?;
+            }
+            (true, false) => Self::unfence(&mut admin, &self.pg.database)?,
+            (true, true) => bail!("interrupted PostgreSQL restore: both target and preserved database {previous} exist; inspect them before manual recovery"),
+            (false, false) => bail!("interrupted PostgreSQL restore: both target and preserved database are missing; manual recovery required"),
+        }
+        std::fs::remove_file(path).context("removing PostgreSQL restore journal")?;
+        Ok(())
+    }
     fn client_major(version: &str) -> Option<u32> {
         version.split_whitespace().find_map(|word| {
             let first = word.split('.').next()?;
@@ -52,33 +107,84 @@ impl PostgresEngine {
         Self { pg }
     }
 
+    fn use_verified_tls(&self) -> bool {
+        let loopback = self.pg.host.eq_ignore_ascii_case("localhost")
+            || self
+                .pg
+                .host
+                .trim_matches(&['[', ']'][..])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        !loopback || std::env::var("DBSNAP_PG_TLS").as_deref() == Ok("verify-full")
+    }
+
     fn connect(&self, dbname: &str) -> Result<postgres::Client> {
-        let host = if self.pg.host.eq_ignore_ascii_case("localhost") {
+        let tls = self.use_verified_tls();
+        let host = if !tls && self.pg.host.eq_ignore_ascii_case("localhost") {
             "127.0.0.1"
         } else {
             &self.pg.host
         };
-        postgres::Config::new()
+        let mut config = postgres::Config::new();
+        config
             .host(host)
             .port(self.pg.port)
             .user(&self.pg.user)
             .password(self.pg.password.as_deref().unwrap_or(""))
-            .dbname(dbname)
-            .connect(NoTls)
-            .with_context(|| format!("connecting to {} (as {})", self.pg.display(), self.pg.user))
+            .dbname(dbname);
+        let result = if tls {
+            let mut builder = native_tls::TlsConnector::builder();
+            if let Some(path) = std::env::var_os("DBSNAP_PG_CA_CERT") {
+                let pem = std::fs::read(path).context("reading PostgreSQL CA certificate")?;
+                builder.add_root_certificate(
+                    native_tls::Certificate::from_pem(&pem)
+                        .context("parsing PostgreSQL CA certificate")?,
+                );
+            }
+            let connector = postgres_native_tls::MakeTlsConnector::new(builder.build()?);
+            config
+                .ssl_mode(postgres::config::SslMode::Require)
+                .connect(connector)
+        } else {
+            config.connect(NoTls)
+        };
+        result.with_context(|| format!("connecting to {} (as {})", self.pg.display(), self.pg.user))
+    }
+
+    fn configure_dump_tls(&self, cmd: &mut Command) {
+        if self.use_verified_tls() {
+            cmd.env("PGSSLMODE", "verify-full");
+            if let Some(path) = std::env::var_os("DBSNAP_PG_CA_CERT") {
+                cmd.env("PGSSLROOTCERT", path);
+            }
+        } else {
+            cmd.env("PGSSLMODE", "disable");
+        }
+        cmd.env_remove("PGHOSTADDR");
+    }
+
+    fn client_connstring(&self) -> String {
+        let mut target = self.pg.clone();
+        if !self.use_verified_tls() && target.host.eq_ignore_ascii_case("localhost") {
+            target.host = "127.0.0.1".to_string();
+        }
+        target.connstring()
     }
 
     /// Control-plane connection — deliberately never to the target database
     /// (we may have to drop it). Tries `postgres`, then `template1`.
     fn maintenance(&self) -> Result<postgres::Client> {
+        let mut last_error = None;
         for db in ["postgres", "template1"] {
-            if let Ok(conn) = self.connect(db) {
-                return Ok(conn);
+            match self.connect(db) {
+                Ok(conn) => return Ok(conn),
+                Err(error) => last_error = Some(error),
             }
         }
         bail!(
-            "cannot connect to a maintenance database (tried postgres, template1) on {}",
-            self.pg.display()
+            "cannot connect to a maintenance database (tried postgres, template1) on {}: {:#}",
+            self.pg.display(),
+            last_error.expect("both connection attempts were made")
         )
     }
 
@@ -168,7 +274,7 @@ impl PostgresEngine {
     /// connection blackout; dev servers reconnect automatically.
     fn save_clone(
         &self,
-        _store: &Storage,
+        store: &Storage,
         tag: &str,
         taken_ids: &HashSet<String>,
     ) -> Result<SaveOutcome> {
@@ -187,7 +293,16 @@ impl PostgresEngine {
         let size = Self::db_size(&mut admin, target)?;
         let version = Self::server_version(&mut admin)?;
 
+        let recovery_name = format!(
+            "{SNAP_PREFIX}previous_{}",
+            util::new_id(&store.load_metadata()?.ids())
+        );
+        if Self::db_exists(&mut admin, &recovery_name)? {
+            bail!("refusing to overwrite existing recovery database {recovery_name}");
+        }
+        self.write_restore_journal(store, &recovery_name)?;
         Self::fence(&mut admin, target)?;
+        Self::restore_failpoint("pg_save_after_fence");
         if let Err(e) = admin.execute(
             &format!(
                 "CREATE DATABASE {} TEMPLATE {}",
@@ -197,10 +312,13 @@ impl PostgresEngine {
             &[],
         ) {
             // Guarantee the fence never outlives the operation (§4-T6).
-            Self::unfence(&mut admin, target).ok();
+            if Self::unfence(&mut admin, target).is_ok() {
+                std::fs::remove_file(Self::journal_path(store)).ok();
+            }
             bail!("creating snapshot clone {snap_db} failed: {e:#}");
         }
         Self::unfence(&mut admin, target)?;
+        std::fs::remove_file(Self::journal_path(store))?;
 
         Ok(SaveOutcome {
             record: SnapshotRecord {
@@ -239,8 +357,10 @@ impl PostgresEngine {
         Self::require_matching_client(&mut admin, "pg_dump")?;
         let size = Self::db_size(&mut admin, &self.pg.database)?;
 
-        let output = Command::new("pg_dump")
-            .args(["-Fc", "-d", &self.pg.connstring(), "-f"])
+        let mut command = Command::new("pg_dump");
+        self.configure_dump_tls(&mut command);
+        let output = command
+            .args(["-Fc", "-d", &self.client_connstring(), "-f"])
             .arg(&staged)
             // password travels via env, never argv (§4-T10)
             .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
@@ -317,8 +437,18 @@ impl PostgresEngine {
             &[],
         )?;
 
+        let previous_name = format!(
+            "{SNAP_PREFIX}previous_{}",
+            util::new_id(&store.load_metadata()?.ids())
+        );
+        if Self::db_exists(&mut admin, &previous_name)? {
+            bail!("refusing to overwrite existing recovery database {previous_name}");
+        }
+        self.write_restore_journal(store, &previous_name)?;
+
         let mut safety: Option<SnapshotRecord> = None;
         Self::fence(&mut admin, target)?;
+        Self::restore_failpoint("pg_clone_after_fence");
         let outcome = (|| -> Result<()> {
             if let Some(tag) = safety_tag {
                 let mut meta = store.load_metadata()?;
@@ -356,7 +486,16 @@ impl PostgresEngine {
                 store.write_metadata(&meta)?;
                 safety = Some(safety_record);
             }
-            admin.execute(&format!("DROP DATABASE {}", Self::quote_ident(target)), &[])?;
+            Self::restore_failpoint("pg_clone_after_safety_snapshot");
+            admin.execute(
+                &format!(
+                    "ALTER DATABASE {} RENAME TO {}",
+                    Self::quote_ident(target),
+                    Self::quote_ident(&previous_name)
+                ),
+                &[],
+            )?;
+            Self::restore_failpoint("pg_clone_after_previous_rename");
             admin.execute(
                 &format!(
                     "ALTER DATABASE {} RENAME TO {}",
@@ -365,11 +504,13 @@ impl PostgresEngine {
                 ),
                 &[],
             )?;
+            Self::restore_failpoint("pg_clone_after_cutover");
             Ok(())
         })();
 
         if let Err(e) = outcome {
-            Self::unfence(&mut admin, target).ok();
+            drop(admin);
+            let recovery = self.recover_interrupted(store);
             let hint = safety
                 .as_ref()
                 .map(|r| {
@@ -379,17 +520,27 @@ impl PostgresEngine {
                     )
                 })
                 .unwrap_or_default();
-            bail!("restore failed: {e:#}{hint}");
+            bail!(
+                "restore failed: {e:#}{hint}\nrecovery: {}",
+                match recovery {
+                    Ok(()) => "original target recovered".to_string(),
+                    Err(err) => format!("manual action required: {err:#}"),
+                }
+            );
         }
         Self::unfence(&mut admin, target)?;
         self.connect(target)
             .context("restore applied but PostgreSQL verification failed")?;
+        admin.execute(
+            &format!("DROP DATABASE {}", Self::quote_ident(&previous_name)),
+            &[],
+        )?;
+        std::fs::remove_file(Self::journal_path(store))?;
         Ok(RestoreOutcome { safety })
     }
 
-    /// Restore a `pg_dump` artifact: verify the file (§4-T3), capture the
-    /// target's encoding/locale/owner, safety-clone, drop + recreate the
-    /// database with those attributes, then `pg_restore` into it.
+    /// Replay a verified dump into staging, then use the journaled clone
+    /// cutover. A replay failure cannot alter the target database.
     fn restore_dump(
         &self,
         store: &Storage,
@@ -432,97 +583,59 @@ impl PostgresEngine {
         let ctype: String = attrs.get(2);
         let owner: String = attrs.get(3);
 
-        let mut safety: Option<SnapshotRecord> = None;
-        Self::fence(&mut admin, target)?;
-        let outcome = (|| -> Result<()> {
-            if let Some(tag) = safety_tag {
-                let mut meta = store.load_metadata()?;
-                let taken = meta.ids();
-                let auto_id = util::new_id(&taken);
-                let auto_name = format!("{SNAP_PREFIX}auto_{auto_id}");
-                let size = Self::db_size(&mut admin, target)?;
-                admin.execute(
-                    &format!(
-                        "CREATE DATABASE {} TEMPLATE {}",
-                        Self::quote_ident(&auto_name),
-                        Self::quote_ident(target)
-                    ),
-                    &[],
-                )?;
-                let safety_record = SnapshotRecord {
-                    id: auto_id,
-                    tag: tag.to_string(),
-                    created_at: Utc::now(),
-                    engine: "postgres".to_string(),
-                    location: Location::PgDatabase { name: auto_name },
-                    size_bytes: size,
-                    original_bytes: size,
-                    blake3: blake3::hash(
-                        format!("pg-clone|{}|{size}", self.pg.display()).as_bytes(),
-                    )
-                    .to_hex()
-                    .to_string(),
-                    method: "pg-clone".to_string(),
-                    pinned: false,
-                    source_state: None,
-                };
-                meta.snapshots.push(safety_record.clone());
-                store.write_metadata(&meta)?;
-                safety = Some(safety_record);
+        // Restore the archive into a managed staging database first. A replay
+        // error leaves the live target untouched.
+        let staging = format!(
+            "{SNAP_PREFIX}restore_{}",
+            util::new_id(&store.load_metadata()?.ids())
+        );
+        admin.execute(
+            &format!(
+                "CREATE DATABASE {} TEMPLATE template0 ENCODING {} LC_COLLATE {} LC_CTYPE {} OWNER {}",
+                Self::quote_ident(&staging), Self::quote_lit(&encoding),
+                Self::quote_lit(&collate), Self::quote_lit(&ctype), Self::quote_ident(&owner)
+            ), &[],
+        )?;
+        let result = (|| -> Result<RestoreOutcome> {
+            let mut staged_target = self.pg.clone();
+            staged_target.database = staging.clone();
+            let staged_engine = Self::new(staged_target);
+            let mut command = Command::new("pg_restore");
+            staged_engine.configure_dump_tls(&mut command);
+            let output = command
+                .args([
+                    "-d",
+                    &staged_engine.client_connstring(),
+                    "--no-owner",
+                    "--exit-on-error",
+                ])
+                .arg(&dump_path)
+                .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
+                .env_remove("PGHOSTADDR")
+                .output()?;
+            if !output.status.success() {
+                bail!(
+                    "pg_restore into staging failed; target was not changed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
             }
-            admin.execute(&format!("DROP DATABASE {}", Self::quote_ident(target)), &[])?;
-            admin.execute(
-                &format!(
-                    "CREATE DATABASE {} TEMPLATE template0 ENCODING {} LC_COLLATE {} LC_CTYPE {} OWNER {}",
-                    Self::quote_ident(target),
-                    Self::quote_lit(&encoding),
-                    Self::quote_lit(&collate),
-                    Self::quote_lit(&ctype),
-                    Self::quote_ident(&owner)
-                ),
-                &[],
-            )?;
-            Ok(())
+            staged_engine
+                .connect(&staging)
+                .context("staged PostgreSQL database verification failed")?;
+            self.restore_clone(store, record, &staging, safety_tag)
         })();
-        if let Err(e) = outcome {
-            Self::unfence(&mut admin, target).ok();
-            let hint = safety
-                .as_ref()
-                .map(|r| {
-                    format!(
-                        "\nthe pre-restore state was saved as snapshot {} — recover with: dbsnap restore {}",
-                        r.id, r.id
-                    )
-                })
-                .unwrap_or_default();
-            bail!("restore failed: {e:#}{hint}");
-        }
-        Self::unfence(&mut admin, target)?;
-
-        let output = Command::new("pg_restore")
-            .args(["-d", &self.pg.connstring(), "--no-owner", "--exit-on-error"])
-            .arg(&dump_path)
-            .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
-            .env_remove("PGHOSTADDR")
-            .output()?;
-        if !output.status.success() {
-            let hint = safety
-                .as_ref()
-                .map(|r| {
-                    format!(
-                        "\nthe pre-restore state was saved as snapshot {} — recover with: dbsnap restore {}",
-                        r.id, r.id
-                    )
-                })
-                .unwrap_or_default();
-            bail!(
-                "pg_restore failed: {}{hint}",
-                String::from_utf8_lossy(&output.stderr).trim()
+        if let Err(error) = admin.execute(
+            &format!("DROP DATABASE {}", Self::quote_ident(&staging)),
+            &[],
+        ) {
+            eprintln!(
+                "warning: {}",
+                crate::util::mask(&format!(
+                    "could not remove staging database {staging}: {error}"
+                ))
             );
         }
-        self.connect(target)
-            .context("restore applied but PostgreSQL verification failed")?;
-        Ok(RestoreOutcome { safety })
+        result
     }
 }
 

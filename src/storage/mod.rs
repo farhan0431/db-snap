@@ -335,9 +335,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         let mut f = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(bytes)?;
-        f.flush()?;
+        f.sync_all()?;
     }
     fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

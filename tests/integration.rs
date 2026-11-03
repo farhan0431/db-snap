@@ -982,6 +982,162 @@ fn postgres_clone_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn postgres_interrupted_rename_recovers_preserved_target() -> Result<()> {
+    use std::str::FromStr;
+    let Some(url) = pg_setup_test_db("recover")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "CREATE TABLE items (id integer); INSERT INTO items VALUES (1);",
+    )?;
+    init(&root, Path::new(&url))?;
+    let target = dbsnap::config::parse_db_string(&url, false)?;
+    let dbsnap::config::DbTarget::Postgres(pg) = &target.target else {
+        unreachable!()
+    };
+    let previous = "__dbsnap_previous_a1b2c3";
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    fs::write(
+        store.root.join("postgres-restore.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version":1, "target":pg.display(), "previous":previous
+        }))?,
+    )?;
+    let base = pg_test_url().unwrap();
+    let mut admin = postgres::Config::from_str(&base)?.connect(postgres::NoTls)?;
+    admin.batch_execute(&format!(
+        "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS false",
+        pg.database
+    ))?;
+    admin.batch_execute(&format!(
+        "ALTER DATABASE \"{}\" RENAME TO \"{}\"",
+        pg.database, previous
+    ))?;
+    let status = ops::status_at(&root, Some(&url))?;
+    assert!(status.contains("PostgreSQL"));
+    assert_eq!(pg_count(&url)?, 1);
+    assert!(!store.root.join("postgres-restore.json").exists());
+    pg_drop_test_db(&url);
+    Ok(())
+}
+
+#[test]
+fn postgres_verified_tls_accepts_ca_and_rejects_wrong_hostname() -> Result<()> {
+    let Ok(url) = std::env::var("DBSNAP_TEST_PG_TLS_URL") else {
+        return Ok(());
+    };
+    let ca = std::env::var_os("DBSNAP_TEST_PG_TLS_CA").expect("TLS test CA is required");
+    let root = temp_root();
+    let run = |target: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+            .current_dir(&root)
+            .env("DATABASE_URL", target)
+            .env("DBSNAP_PG_TLS", "verify-full")
+            .env("DBSNAP_PG_CA_CERT", &ca)
+            .arg("status")
+            .output()
+    };
+    let ok = run(&url)?;
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    // Use a separate project so fingerprint binding cannot mask TLS failure.
+    let bad_root = temp_root();
+    let bad_url = url.replace("localhost", "127.0.0.1");
+    let bad = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&bad_root)
+        .env("DATABASE_URL", bad_url)
+        .env("DBSNAP_PG_TLS", "verify-full")
+        .env("DBSNAP_PG_CA_CERT", ca)
+        .arg("status")
+        .output()?;
+    assert!(
+        !bad.status.success(),
+        "TLS must reject a certificate for another hostname"
+    );
+    Ok(())
+}
+
+#[test]
+fn postgres_clone_process_interruption_is_recoverable_or_stops_safely() -> Result<()> {
+    for phase in [
+        "pg_clone_after_fence",
+        "pg_clone_after_safety_snapshot",
+        "pg_clone_after_previous_rename",
+        "pg_clone_after_cutover",
+    ] {
+        let Some(url) = pg_setup_test_db(phase)? else {
+            return Ok(());
+        };
+        let root = temp_root();
+        pg_exec(
+            &url,
+            "CREATE TABLE items (id integer); INSERT INTO items VALUES (1);",
+        )?;
+        init(&root, Path::new(&url))?;
+        save(&root, Path::new(&url), "baseline")?;
+        pg_exec(&url, "INSERT INTO items VALUES (2);")?;
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+            .current_dir(&root)
+            .env("DATABASE_URL", &url)
+            .env("DBSNAP_TEST_FAILPOINT", phase)
+            .args(["restore", "baseline"])
+            .output()?;
+        assert_eq!(
+            result.status.code(),
+            Some(86),
+            "{phase}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let store = dbsnap::storage::Storage::find(&root).unwrap();
+        if phase == "pg_clone_after_cutover" {
+            let err = ops::status_at(&root, Some(&url)).unwrap_err();
+            assert!(format!("{err:#}").contains("both target and preserved database"));
+            assert!(store.root.join("postgres-restore.json").exists());
+            assert_eq!(pg_count(&url)?, 1);
+        } else {
+            ops::status_at(&root, Some(&url))?;
+            assert_eq!(pg_count(&url)?, 2, "{phase}");
+            assert!(!store.root.join("postgres-restore.json").exists());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn postgres_save_interruption_recovers_connection_fence() -> Result<()> {
+    let Some(url) = pg_setup_test_db("savefence")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "CREATE TABLE items (id integer); INSERT INTO items VALUES (1);",
+    )?;
+    init(&root, Path::new(&url))?;
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .env("DATABASE_URL", &url)
+        .env("DBSNAP_TEST_FAILPOINT", "pg_save_after_fence")
+        .args(["save", "interrupted"])
+        .output()?;
+    assert_eq!(
+        result.status.code(),
+        Some(86),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(pg_count(&url).is_err());
+    ops::status_at(&root, Some(&url))?;
+    assert_eq!(pg_count(&url)?, 1);
+    Ok(())
+}
+
+#[test]
 fn postgres_dump_roundtrip() -> Result<()> {
     let Some(url) = pg_setup_test_db("dump")? else {
         return Ok(());
@@ -1067,6 +1223,43 @@ fn postgres_dump_client_version_mismatch_is_rejected_before_save() -> Result<()>
         .snapshots
         .is_empty());
     pg_drop_test_db(&url);
+    Ok(())
+}
+
+#[test]
+fn postgres_failed_dump_replay_does_not_touch_target() -> Result<()> {
+    let Some(url) = pg_setup_test_db("badreplay")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "CREATE TABLE items (id integer); INSERT INTO items VALUES (1);",
+    )?;
+    init(&root, Path::new(&url))?;
+    ops::save_at(
+        &root,
+        Some(&url),
+        Some("dump".into()),
+        false,
+        false,
+        SaveMethod::Dump,
+    )?;
+    pg_exec(&url, "INSERT INTO items VALUES (2);")?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let mut metadata = store.load_metadata()?;
+    let record = metadata
+        .snapshots
+        .iter_mut()
+        .find(|r| r.tag == "dump")
+        .unwrap();
+    let path = store.snapshot_path(record)?;
+    fs::write(&path, b"not a postgres archive")?;
+    record.blake3 = dbsnap::storage::compress::hash_file(&path)?;
+    store.write_metadata(&metadata)?;
+    let error = restore(&root, Path::new(&url), Some("dump"), true).unwrap_err();
+    assert!(format!("{error:#}").contains("target was not changed"));
+    assert_eq!(pg_count(&url)?, 2);
     Ok(())
 }
 

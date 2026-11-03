@@ -78,7 +78,11 @@ fn ensure_active_binding(ctx: &Ctx) -> Result<()> {
     if ctx.store.load_config()? != fingerprint {
         bail!("the project binding changed; restart the operation and verify the database target");
     }
-    ensure_catalog_binding(&ctx.store, &fingerprint)
+    ensure_catalog_binding(&ctx.store, &fingerprint)?;
+    if let DbTarget::Postgres(target) = &ctx.db.target {
+        engine::postgres::PostgresEngine::new(target.clone()).recover_interrupted(&ctx.store)?;
+    }
+    Ok(())
 }
 
 /// Check the MCP target before creating or changing any project files.

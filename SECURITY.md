@@ -47,8 +47,11 @@ They do not constitute a security audit or a production backup guarantee:
   `--single-transaction` dump is consistent for InnoDB tables, not for
   MyISAM.
 - PostgreSQL clone restore is not atomic; the source snapshot is preserved.
-  Interrupted operations can require manual recovery. PostgreSQL connections
-  use `NoTls`; certificate-verified TLS is not implemented.
+  A recovery journal handles some interruptions, but ambiguous states require
+  manual recovery. Dump replay occurs in staging before the same cutover.
+- PostgreSQL network connections require TLS with certificate and hostname
+  verification; loopback uses no TLS unless `DBSNAP_PG_TLS=verify-full` is set.
+  `DBSNAP_PG_CA_CERT` can supply an additional trusted PEM CA certificate.
 - MCP restore and prune are disabled unless the server is started with
   `--allow-destructive`. There is no per-operation approval mechanism.
 - The masking layer is defense in depth, not a sandbox: an AI agent with

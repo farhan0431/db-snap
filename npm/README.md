@@ -120,8 +120,10 @@ PostgreSQL server's major version. Mismatched tools are rejected before restore.
 - A PostgreSQL server-side clone has a metadata fingerprint, not a content
   checksum. dbsnap checks that the clone exists before restore.
 - PostgreSQL restore is not atomic; an interruption can require manual
-  recovery from a safety snapshot. The built-in PostgreSQL driver uses `NoTls`
-  and does not yet support certificate-verified TLS.
+  recovery. Clone and staged dump restores journal their cutover.
+- PostgreSQL network connections require verified TLS. Set `DBSNAP_PG_CA_CERT`
+  to a trusted CA PEM file if needed; use `DBSNAP_PG_TLS=verify-full` to require
+  TLS on loopback connections as well.
 
 dbsnap is intended for development workflows. Keep independent backups for
 data you cannot afford to lose.

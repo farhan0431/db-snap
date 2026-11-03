@@ -186,20 +186,24 @@ apply it across every project. The canonical copy lives in
 - **Host guard.** MCP accepts SQLite and loopback database hosts only. The CLI
   also allows private-network addresses by default; other addresses require
   `--allow-remote`. A loopback address alone does not prove a database is safe.
-- **PostgreSQL network connections:** the built-in driver currently uses
-  `NoTls`. Do not use it over untrusted networks; verified TLS is not yet supported.
+- **PostgreSQL network connections:** non-loopback connections require TLS
+  with certificate and hostname verification. To add a trusted CA, set
+  `DBSNAP_PG_CA_CERT` to its PEM file. Set `DBSNAP_PG_TLS=verify-full` to
+  require verified TLS on loopback as well.
 - **Project binding.** `.dbsnap/config.json` fingerprints your database;
   restoring a snapshot into a *different* project's database is refused
   (`--force` to override deliberately).
 - **Verify before restore.** SQLite chunks and dump artifacts are checked
   before restore. A PostgreSQL server-side clone is checked for existence;
   its metadata fingerprint is not a checksum of the database contents.
-- **PostgreSQL restore is not atomic.** Interruption between dropping the target
-  and renaming its clone may require manual recovery from the safety snapshot.
-- **Automatic safety snapshot** before every restore — a failed restore always
-  leaves a one-command way back.
-- **Atomic everything.** Metadata writes are atomic, operations are guarded by
-  a cross-process lock, and a killed process leaves no half-state.
+- **PostgreSQL restore is not atomic.** Clone restore records a recovery journal
+  and preserves the old target during cutover. Ambiguous recovery states require
+  manual inspection. Dump replay is first tested in a staging database and then
+  uses the same cutover; an interrupted cutover may require manual recovery.
+- **Safety snapshots** are created by default before restore; the CLI can
+  explicitly disable them. Some interrupted operations require manual recovery.
+- **Cross-process locking** serializes catalog operations. Metadata is written
+  by rename, but power-loss durability is not guaranteed.
 - **No credentials stored.** Nothing in `.dbsnap/` ever contains your password.
 
 ## How it works
@@ -208,7 +212,7 @@ apply it across every project. The canonical copy lives in
   **64 KB page-aligned blocks** (blake3-hashed) → only chunks not already in
   the store are written (zstd). A snapshot is a small manifest of chunk
   hashes, so incremental snapshots cost kilobytes–megabytes, not the whole
-  database. Unchanged databases are *linked* with zero I/O.
+  database. Unchanged content is checked and linked without duplicate chunks.
 - **SQLite restore:** reassemble from the chunk store, verifying every
   chunk's hash → Backup API into the live database (works even on Windows
   while the file is open) → `PRAGMA wal_checkpoint(TRUNCATE)` so the dev
@@ -217,10 +221,9 @@ apply it across every project. The canonical copy lives in
   TEMPLATE dev` — a block-level copy inside the server, done in ~1 s with a
   brief connection blackout (your dev server reconnects automatically).
   **`--method dump`:** `pg_dump -Fc` — slower but portable across machines.
-- **PostgreSQL restore (clone):** fence the target (block new connections),
-  clone the current state as an automatic safety snapshot, drop + rename in
-  one step, unfence. Restore from a dump re-creates the database with its
-  original encoding/locale and replays `pg_restore`.
+- **PostgreSQL restore:** create a working database, fence the target, record
+  a safety snapshot, and use a journaled rename cutover. Dump replay occurs in
+  staging first. Cutover is not atomic and may require manual recovery.
 - **MySQL/MariaDB save:** `mysqldump --single-transaction` (consistent for
   InnoDB without locking writers) → zstd → blake3. Flavor detection picks
   `mariadb-dump` vs `mysqldump` and retries with a fallback flag set for the
