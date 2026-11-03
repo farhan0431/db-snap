@@ -123,8 +123,8 @@ def main():
             for key in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
                 env.pop(key, None)
             env["PGPASSWORD" if options.engine == "postgres" else "MYSQL_PWD"] = unquote(parsed.password or "")
-            def sql(query, admin=False):
-                database = unquote(parsed.path[1:]) if admin else name
+            def sql(query, admin=False, database_override=None):
+                database = database_override or (unquote(parsed.path[1:]) if admin else name)
                 if options.engine == "postgres":
                     args = ["psql", "-X", "-w", "-h", parsed.hostname, "-p", str(parsed.port or 5432),
                             "-U", unquote(parsed.username or "postgres"), "-d", database,
@@ -171,9 +171,20 @@ def main():
                     connection.commit()
                 assert rows() == 2
             elif options.engine == "postgres":
-                fork = json.loads(cli("sandbox", "before"))["database"]
+                sandbox = json.loads(cli("sandbox", "before"))
+                assert sandbox["source_modified"] is False
+                # CLI output masks credentials even when a short password is
+                # also part of a generated identifier (CI uses "dbsnap").
+                # Read the exact owned resource from its local registry.
+                registry = json.loads((root / ".dbsnap" / "sandboxes.json").read_text())
+                fork = registry[-1]["name"]
                 assert fork.startswith("__dbsnap_sandbox_") and fork.replace('_','').isalnum()
-                sql(f'DROP DATABASE "{fork}"', admin=True)
+                try:
+                    assert sql("SELECT COUNT(*) FROM items", database_override=fork) == "1"
+                    sql("DELETE FROM items", database_override=fork)
+                    assert rows() == 2, "sandbox writes must not change source"
+                finally:
+                    sql(f'DROP DATABASE "{fork}"', admin=True)
             else:
                 cli("sandbox", "before", error=True)
                 if options.docker_sandbox:

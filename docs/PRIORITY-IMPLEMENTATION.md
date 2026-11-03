@@ -77,3 +77,10 @@ for a new hosted multi-platform CI/release run of the uncommitted source tree.
 
 Raw checkpoint command output is spooled in guarded OS temporary files outside
 the catalog and masked before returning it; normal completion removes the files.
+
+The first hosted v0.4.0 CI run exposed a PostgreSQL process-test assumption:
+its dummy password `dbsnap` is also part of generated sandbox identifiers, so
+credential masking changes the displayed name. Cleanup now reads the exact
+owned name from the local sandbox registry and checks isolated row mutation
+before dropping that database. The complete PostgreSQL CLI/MCP script passed
+locally with that same dummy password after this change.
