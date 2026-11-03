@@ -244,7 +244,10 @@ impl DatabaseEngine for SqliteEngine {
                     safety = Some(outcome.record);
                 }
                 Err(e) => {
-                    eprintln!("warning: pre-restore safety snapshot failed: {e:#}");
+                    eprintln!(
+                        "warning: {}",
+                        crate::util::mask(&format!("pre-restore safety snapshot failed: {e:#}"))
+                    );
                 }
             }
         }

@@ -1,9 +1,22 @@
-# ⚡ dbsnap — Instant Database Time-Machine for AI Agents & Vibe Coders
+<div align="center">
 
-> **"git commit / git checkout" for your local database.**
-> Physical, DDL-proof SQLite snapshots in milliseconds, with a built-in
-> **MCP server** so Cursor, Windsurf, and Claude Code can protect and heal
-> your database themselves.
+# ⚡ dbsnap
+
+**"git commit / git checkout" for your local database.**
+
+Physical, DDL-proof snapshots in milliseconds — with a built-in
+**MCP server** so Cursor, Windsurf, and Claude Code can protect and heal
+your database themselves.
+
+[![CI](https://github.com/username/db-snap/actions/workflows/ci.yml/badge.svg)](https://github.com/username/db-snap/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/dbsnap.svg)](https://crates.io/crates/dbsnap)
+[![npm](https://img.shields.io/npm/v/db-snap.svg)](https://www.npmjs.com/package/db-snap)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)
+
+**SQLite** (delta snapshots, ms) · **PostgreSQL** (server-side clones, s) · **MySQL/MariaDB** (consistent dumps, s)
+
+</div>
 
 ```bash
 dbsnap save "before-auth-migration"   # commit point — instant
@@ -37,6 +50,22 @@ npx db-snap list
 # or via cargo:
 cargo install dbsnap
 ```
+
+Binaries are prebuilt for **Windows (x64), macOS (Intel + Apple Silicon),
+and Linux (x64 gnu/musl + arm64)** — no Node.js, Python, Docker, or
+database client libraries required for the core (client tools only for
+`pg_dump`/`mysqldump` modes).
+
+### Engines at a glance
+
+| | SQLite | PostgreSQL | MySQL / MariaDB |
+| :--- | :--- | :--- | :--- |
+| Method | delta snapshots (content-addressed chunks) | server-side template clone, or `pg_dump -Fc` | consistent `--single-transaction` dump |
+| Snapshot latency | **< 10 ms** + one pass over the file | ~1 s (block copy) | seconds (dump) |
+| Incremental cost | kilobytes (only changed 64 KB chunks) | full copy server-side | full dump |
+| Hot (dev server running) | ✅ | ✅ (brief reconnect blip) | ✅ |
+| Survives container rebuild | ✅ | clone: ❌ · dump: ✅ | ✅ |
+| Extra requirements | none | `CREATEDB` privilege; `pg_dump` for dump mode | `mysqldump`/`mariadb-dump` in PATH |
 
 Supported: **SQLite** (delta snapshots), **PostgreSQL** (server-side template
 clones + portable `pg_dump`), and **MySQL/MariaDB** (consistent logical dumps
@@ -167,12 +196,51 @@ scripts/e2e-pg.sh    # PostgreSQL: clone snapshot, destructive DDL, rollback
 scripts/e2e-mysql.sh # MySQL/MariaDB: consistent dump, destructive DDL, rollback
 ```
 
+## Measured, not marketing
+
+All numbers from the test suite and `scripts/e2e-*.sh` on a development
+machine:
+
+| Scenario | Result |
+| :--- | :--- |
+| SQLite snapshot (100 MB, unchanged DB) | linked, **0 I/O** (`PRAGMA data_version` short-circuit) |
+| SQLite snapshot (1.6 MB DB, one 8 KB row changed) | **46.9 KB** written (13.7× smaller than full copy) |
+| SQLite restore under a live WAL writer | data verified restored; server kept writing through the whole episode |
+| PostgreSQL `DROP COLUMN` → rollback | 50 rows + column verified back bit-for-bit via `psql` |
+| MySQL `DROP COLUMN` → rollback | 5 rows + column verified back via `mysql` client |
+
 ## Roadmap
 
 - [x] **v0.1.0** — SQLite engine, CLI, MCP server, npm distribution
 - [x] **v0.1.5** — delta snapshots (content-addressed storage, 64 KB page-aligned chunks)
 - [x] **v0.2.0** — PostgreSQL (server-side template cloning + `pg_dump`, fencing & healing)
 - [x] **v0.3.0** — MySQL/MariaDB (consistent dumps, flavor detection, charset preservation)
+- [ ] `dbsnap export/import` — portable snapshot archives across machines
+- [ ] snapshot diffing (`dbsnap diff`)
+
+## Repository layout
+
+```text
+db-snap/
+├── src/
+│   ├── engine/        # sqlite.rs · postgres.rs · mysql.rs — one trait, three engines
+│   ├── storage/       # .dbsnap/ catalog, delta chunk store (CAS), compression
+│   ├── mcp/           # JSON-RPC stdio server + agent-facing tool schemas
+│   ├── ops.rs         # shared command layer (CLI & MCP call the same code)
+│   ├── config.rs      # DATABASE_URL resolution, fingerprinting, host guard
+│   └── util.rs        # redaction, ids, formatting
+├── tests/             # 29 tests incl. live PostgreSQL/MySQL roundtrips
+├── npm/               # meta package + per-platform binary packages
+├── scripts/           # e2e demos: live-writer, PostgreSQL, MySQL
+├── skill/dbsnap/      # agent skill installed by `dbsnap init`
+├── docs/DESIGN.md     # full architecture + threat model
+└── .github/workflows/ # CI (3 OS × 3 engines) + release (6 platform builds)
+```
+
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Security issues:
+[SECURITY.md](SECURITY.md) (private disclosure, please).
 
 ## License
 

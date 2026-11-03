@@ -69,13 +69,17 @@ fn tools_call(ctx: &Ctx, params: Option<&Value>) -> Result<Value, (i64, String)>
     };
 
     Ok(match tool_result {
-        Ok(text) => json!({ "content": [ { "type": "text", "text": text } ], "isError": false }),
-        Err(e) => {
-            json!({ "content": [ { "type": "text", "text": format!("Error: {e:#}") } ], "isError": true })
-        }
+        Ok(text) => json!({
+            "content": [ { "type": "text", "text": crate::util::mask(&text) } ],
+            "isError": false
+        }),
+        Err(e) => json!({
+            "content": [ { "type": "text", "text": crate::util::mask(&format!("Error: {e:#}")) } ],
+            "isError": true
+        }),
     })
 }
 
 fn error_result(text: &str) -> Value {
-    json!({ "content": [ { "type": "text", "text": text } ], "isError": true })
+    json!({ "content": [ { "type": "text", "text": crate::util::mask(text) } ], "isError": true })
 }

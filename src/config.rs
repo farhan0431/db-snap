@@ -184,6 +184,9 @@ fn server_from(raw: &str, allow_remote: bool, engine: Engine) -> Result<Resolved
         url.username().to_string()
     };
     let password = url.password().map(percent_decode);
+    if let Some(p) = &password {
+        crate::util::register_secret(p);
+    }
     let database = url.path().trim_start_matches('/').to_string();
     if database.is_empty() {
         bail!("{scheme} URL has no database name: {raw:?}");

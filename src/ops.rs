@@ -56,60 +56,72 @@ pub fn context_at(
     }
 }
 
+/// Final redaction layer for every public command: passwords parsed from
+/// URLs are registered globally (config::server_from) and scrubbed from
+/// both success text and error chains before they can reach a human or an
+/// AI agent (§4-T11).
+fn redact(result: Result<String>) -> Result<String> {
+    result
+        .map(|s| util::mask(&s))
+        .map_err(|e| anyhow::anyhow!(util::mask(&format!("{e:#}"))))
+}
+
 pub fn init_at(root: &Path, explicit: Option<&str>, allow_remote: bool) -> Result<String> {
-    let db = config::resolve(explicit, allow_remote)?;
-    let fingerprint = db.fingerprint();
-    let existed = Storage::find(root).is_some();
-    let store = Storage::create(root, &fingerprint)?;
+    redact((|| {
+        let db = config::resolve(explicit, allow_remote)?;
+        let fingerprint = db.fingerprint();
+        let existed = Storage::find(root).is_some();
+        let store = Storage::create(root, &fingerprint)?;
 
-    let mut msg = if existed {
-        "re-bound project database".to_string()
-    } else {
-        "initialized dbsnap".to_string()
-    };
-    msg.push_str(&format!(
-        "\n  database : {} ({})\n  storage  : {}",
-        db.engine,
-        db.display(),
-        store.root.display()
-    ));
+        let mut msg = if existed {
+            "re-bound project database".to_string()
+        } else {
+            "initialized dbsnap".to_string()
+        };
+        msg.push_str(&format!(
+            "\n  database : {} ({})\n  storage  : {}",
+            db.engine,
+            db.display(),
+            store.root.display()
+        ));
 
-    let engine = engine::make(&db)?;
-    match engine.probe() {
-        Ok(info) => {
-            let size = info
-                .size_bytes
-                .map(|s| format!(", {}", util::format_size(s)))
-                .unwrap_or_default();
-            msg.push_str(&format!("\n  engine   : {}{size}", info.detail));
-        }
-        Err(_) => {
-            msg.push_str(
+        let engine = engine::make(&db)?;
+        match engine.probe() {
+            Ok(info) => {
+                let size = info
+                    .size_bytes
+                    .map(|s| format!(", {}", util::format_size(s)))
+                    .unwrap_or_default();
+                msg.push_str(&format!("\n  engine   : {}{size}", info.detail));
+            }
+            Err(_) => {
+                msg.push_str(
                 "\n  warning  : database unreachable — check the server / file path before saving",
             );
+            }
         }
-    }
 
-    msg.push_str("\n  git      : .dbsnap/ registered in .gitignore");
+        msg.push_str("\n  git      : .dbsnap/ registered in .gitignore");
 
-    // Install the agent skill so AI editors pick up the workflow automatically.
-    let skill_path = root
-        .join(".agents")
-        .join("skills")
-        .join("dbsnap")
-        .join("SKILL.md");
-    if !skill_path.exists() {
-        if let Some(parent) = skill_path.parent() {
-            fs::create_dir_all(parent)?;
+        // Install the agent skill so AI editors pick up the workflow automatically.
+        let skill_path = root
+            .join(".agents")
+            .join("skills")
+            .join("dbsnap")
+            .join("SKILL.md");
+        if !skill_path.exists() {
+            if let Some(parent) = skill_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&skill_path, AGENT_SKILL_MD)?;
+            msg.push_str(&format!(
+                "\n  agent    : skill installed at {}",
+                skill_path.display()
+            ));
         }
-        fs::write(&skill_path, AGENT_SKILL_MD)?;
-        msg.push_str(&format!(
-            "\n  agent    : skill installed at {}",
-            skill_path.display()
-        ));
-    }
-    msg.push_str("\nnext: dbsnap save \"initial-seed\"");
-    Ok(msg)
+        msg.push_str("\nnext: dbsnap save \"initial-seed\"");
+        Ok(msg)
+    })())
 }
 
 pub fn save_at(
@@ -120,8 +132,10 @@ pub fn save_at(
     allow_remote: bool,
     method: engine::SaveMethod,
 ) -> Result<String> {
-    let ctx = context_at(root, explicit, force, allow_remote)?;
-    save_with(&ctx, tag, method)
+    redact((|| {
+        let ctx = context_at(root, explicit, force, allow_remote)?;
+        save_with(&ctx, tag, method)
+    })())
 }
 
 pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> Result<String> {
@@ -178,8 +192,10 @@ pub fn restore_at(
     force: bool,
     allow_remote: bool,
 ) -> Result<String> {
-    let ctx = context_at(root, explicit, force, allow_remote)?;
-    restore_with(&ctx, id_or_tag, safety)
+    redact((|| {
+        let ctx = context_at(root, explicit, force, allow_remote)?;
+        restore_with(&ctx, id_or_tag, safety)
+    })())
 }
 
 pub fn restore_with(ctx: &Ctx, id_or_tag: Option<String>, safety: bool) -> Result<String> {
@@ -268,12 +284,19 @@ fn remove_records(
     let mut survivor_manifests: HashSet<&str> = HashSet::new();
     let mut survivor_chunks: HashSet<String> = HashSet::new();
     let mut survivor_pgdbs: HashSet<&str> = HashSet::new();
+    // Manifest reading is the only O(catalog × chunks) part here — skip it
+    // entirely when no delta snapshot is involved in the prune.
+    let needs_manifest_scan = victims
+        .iter()
+        .any(|v| matches!(v.location, crate::storage::Location::Manifest { .. }));
     for s in &survivors.snapshots {
         match &s.location {
             crate::storage::Location::Manifest { path } => {
                 survivor_manifests.insert(path.as_str());
-                if let Ok(m) = store.read_manifest_file(path) {
-                    survivor_chunks.extend(m.hexes());
+                if needs_manifest_scan {
+                    if let Ok(m) = store.read_manifest_file(path) {
+                        survivor_chunks.extend(m.hexes());
+                    }
                 }
             }
             crate::storage::Location::PgDatabase { name } => {
@@ -320,7 +343,10 @@ fn remove_records(
                 if !survivor_pgdbs.contains(name.as_str()) {
                     if let Some(pg) = pg {
                         if let Err(e) = crate::engine::postgres::drop_managed_db(pg, name) {
-                            eprintln!("warning: could not drop {name}: {e:#}");
+                            eprintln!(
+                                "warning: {}",
+                                util::mask(&format!("could not drop {name}: {e:#}"))
+                            );
                         }
                     }
                 }
@@ -332,8 +358,10 @@ fn remove_records(
 }
 
 pub fn list_at(root: &Path, explicit: Option<&str>) -> Result<String> {
-    let ctx = context_at(root, explicit, false, false)?;
-    list_with(&ctx)
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        list_with(&ctx)
+    })())
 }
 
 pub fn list_with(ctx: &Ctx) -> Result<String> {
@@ -392,8 +420,10 @@ pub fn list_with(ctx: &Ctx) -> Result<String> {
 }
 
 pub fn prune_at(root: &Path, explicit: Option<&str>, keep: usize) -> Result<String> {
-    let ctx = context_at(root, explicit, false, false)?;
-    prune_with(&ctx, keep)
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        prune_with(&ctx, keep)
+    })())
 }
 
 pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
@@ -427,8 +457,10 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
 }
 
 pub fn status_at(root: &Path, explicit: Option<&str>) -> Result<String> {
-    let ctx = context_at(root, explicit, false, false)?;
-    status_with(&ctx)
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        status_with(&ctx)
+    })())
 }
 
 pub fn status_with(ctx: &Ctx) -> Result<String> {

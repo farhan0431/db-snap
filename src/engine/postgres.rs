@@ -90,7 +90,10 @@ impl PostgresEngine {
     /// died mid-fence (§2.2 rule 2 / §4-T6).
     fn heal(admin: &mut postgres::Client, db: &str) {
         if let Err(e) = Self::unfence(admin, db) {
-            eprintln!("warning: could not heal connection fence on {db}: {e:#}");
+            eprintln!(
+                "warning: {}",
+                crate::util::mask(&format!("could not heal connection fence on {db}: {e:#}"))
+            );
         }
     }
 

@@ -65,7 +65,11 @@ fn run(command: Command) -> i32 {
             return match mcp::run(db.as_deref()) {
                 Ok(()) => 0,
                 Err(e) => {
-                    eprintln!("{} {:#}", "error:".red().bold(), e);
+                    eprintln!(
+                        "{} {:#}",
+                        "error:".red().bold(),
+                        dbsnap::util::mask(&format!("{e:#}"))
+                    );
                     1
                 }
             };
@@ -74,11 +78,15 @@ fn run(command: Command) -> i32 {
 
     match result {
         Ok(message) => {
-            println!("{message}");
+            println!("{}", dbsnap::util::mask(&message));
             0
         }
         Err(e) => {
-            eprintln!("{} {:#}", "error:".red().bold(), e);
+            eprintln!(
+                "{} {:#}",
+                "error:".red().bold(),
+                dbsnap::util::mask(&format!("{e:#}"))
+            );
             1
         }
     }

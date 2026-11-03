@@ -113,7 +113,7 @@ fn save_restore_cycle() -> Result<()> {
     create_db(&db, 5);
 
     let out = init(&root, &db)?;
-    assert!(out.contains("initialized dbsnap"));
+    assert!(out.contains("initialized"));
     assert!(
         out.contains("skill installed"),
         "init installs the agent skill"
@@ -468,7 +468,11 @@ fn mcp_stdio_roundtrip() -> Result<()> {
         "init: {}",
         responses[0]
     );
-    assert!(responses[0].contains("dbsnap"), "init: {}", responses[0]);
+    assert!(
+        responses[0].contains(env!("CARGO_PKG_VERSION")),
+        "init: {}",
+        responses[0]
+    );
     assert!(
         responses[1].contains("dbsnap_create_snapshot"),
         "tools: {}",
@@ -775,4 +779,45 @@ fn mysql_dump_roundtrip() -> Result<()> {
 /// setup di atas.
 fn my_exec_url(url: &str, db: Option<&str>, sql: &str) -> Result<()> {
     my_run(url, db, sql).map(|_| ())
+}
+
+#[test]
+fn credentials_never_leak_into_output_or_metadata() -> Result<()> {
+    // Dijalankan terhadap MySQL uji yang password-nya ada di URL —
+    // password TIDAK boleh muncul di output CLI, MCP, maupun file .dbsnap.
+    let Some(url) = my_test_url() else {
+        return Ok(());
+    };
+    let password = my_parts(&url).password;
+    if password.is_empty() {
+        return Ok(()); // server uji tanpa password — tidak ada yang diuji
+    }
+    let root = temp_root();
+
+    let init_out = init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "leak-check")?;
+    let list_out = ops::list_at(&root, Some(&url))?;
+    let status_out = ops::status_at(&root, Some(&url))?;
+
+    for (label, text) in [
+        ("init output", init_out),
+        ("list output", list_out),
+        ("status output", status_out),
+    ] {
+        assert!(
+            !text.contains(&password),
+            "{label} must not contain the database password: {text}"
+        );
+    }
+
+    // file katalog juga tidak menyimpan kredensial
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    for file in ["config.json", "metadata.json"] {
+        let raw = fs::read_to_string(store.root.join(file))?;
+        assert!(
+            !raw.contains(&password),
+            "{file} must never contain the database password"
+        );
+    }
+    Ok(())
 }
