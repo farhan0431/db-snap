@@ -23,8 +23,13 @@ impl PostgresEngine {
     }
 
     fn connect(&self, dbname: &str) -> Result<postgres::Client> {
+        let host = if self.pg.host.eq_ignore_ascii_case("localhost") {
+            "127.0.0.1"
+        } else {
+            &self.pg.host
+        };
         postgres::Config::new()
-            .host(&self.pg.host)
+            .host(host)
             .port(self.pg.port)
             .user(&self.pg.user)
             .password(self.pg.password.as_deref().unwrap_or(""))
@@ -65,13 +70,18 @@ impl PostgresEngine {
             ),
             &[],
         )?;
-        admin.execute(
+        if let Err(e) = admin.execute(
             &format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = {} AND pid <> pg_backend_pid()",
                 Self::quote_lit(db)
             ),
             &[],
-        )?;
+        ) {
+            return match Self::unfence(admin, db) {
+                Ok(()) => Err(e).context("terminating database connections; fence was removed"),
+                Err(cleanup) => bail!("terminating database connections failed: {e}; removing the connection fence also failed: {cleanup}"),
+            };
+        }
         Ok(())
     }
 
@@ -177,6 +187,7 @@ impl PostgresEngine {
                 .to_hex()
                 .to_string(),
                 method: "pg-clone".to_string(),
+                pinned: false,
                 source_state: None,
             },
             linked: false,
@@ -208,6 +219,7 @@ impl PostgresEngine {
             .arg(&out_path)
             // password travels via env, never argv (§4-T10)
             .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
+            .env_remove("PGHOSTADDR")
             .output()?;
         if !output.status.success() {
             bail!(
@@ -230,6 +242,7 @@ impl PostgresEngine {
                 original_bytes: size,
                 blake3: hash,
                 method: "pg-dump".to_string(),
+                pinned: false,
                 source_state: None,
             },
             linked: false,
@@ -294,6 +307,7 @@ impl PostgresEngine {
                     .to_hex()
                     .to_string(),
                     method: "pg-clone".to_string(),
+                    pinned: false,
                     source_state: None,
                 };
                 meta.snapshots.push(safety_record.clone());
@@ -326,6 +340,8 @@ impl PostgresEngine {
             bail!("restore failed: {e:#}{hint}");
         }
         Self::unfence(&mut admin, target)?;
+        self.connect(target)
+            .context("restore applied but PostgreSQL verification failed")?;
         Ok(RestoreOutcome { safety })
     }
 
@@ -412,6 +428,7 @@ impl PostgresEngine {
                     .to_hex()
                     .to_string(),
                     method: "pg-clone".to_string(),
+                    pinned: false,
                     source_state: None,
                 };
                 meta.snapshots.push(safety_record.clone());
@@ -451,6 +468,7 @@ impl PostgresEngine {
             .args(["-d", &self.pg.connstring(), "--no-owner"])
             .arg(&dump_path)
             .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
+            .env_remove("PGHOSTADDR")
             .output()?;
         if !output.status.success() {
             let hint = safety
@@ -467,6 +485,8 @@ impl PostgresEngine {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
+        self.connect(target)
+            .context("restore applied but PostgreSQL verification failed")?;
         Ok(RestoreOutcome { safety })
     }
 }

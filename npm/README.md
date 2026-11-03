@@ -69,6 +69,10 @@ before making changes. The server also exposes tools to create, list, restore,
 and prune snapshots. It resolves the project from its working directory, so
 start it in the project you want to protect.
 
+Restore and prune are disabled by default in MCP. To enable them for a server
+session, start it with `dbsnap mcp --allow-destructive`. This is a session
+setting, not a per-operation approval prompt.
+
 `dbsnap init` also writes `.agents/skills/dbsnap/SKILL.md` in the project.
 Whether that skill is loaded automatically depends on the AI client; the skill
 file and the MCP server are separate integrations.
@@ -85,10 +89,12 @@ file and the MCP server are separate integrations.
 | `dbsnap rollback` | Restore the latest snapshot. |
 | `dbsnap prune --keep 5` | Remove older snapshots and retain the newest five. |
 | `dbsnap diff before after` | Compare SQLite snapshot schemas and table row counts. |
+| `dbsnap pin <tag-or-id>` | Protect a snapshot from pruning; use `unpin` to remove protection. |
 
 `dbsnap list --json` and `dbsnap status --json` provide machine-readable
 output. SQLite `diff` does not compare individual row contents; PostgreSQL and
 MySQL/MariaDB snapshot diffs are not currently supported.
+Pinned snapshots survive `prune`, including `--all`.
 
 ## Database requirements
 
@@ -103,12 +109,17 @@ when the snapshot needs to survive removal of that server's data volume.
 
 ## Safety
 
-- The default host guard restricts operation to local and private-network
-  targets. MCP always uses that guard.
+- MCP permits SQLite and loopback database hosts only. The CLI also permits
+  private-network targets by default. A local target is not necessarily safe.
 - Project binding checks that the current target matches the recorded database.
-- Restore verifies the selected snapshot before applying it and, by default,
+- Restore checks SQLite chunks and dump artifacts before applying them and, by default,
   creates a safety snapshot first. If that snapshot cannot be created, restore
   stops; the CLI has an explicit option to skip it.
+- A PostgreSQL server-side clone has a metadata fingerprint, not a content
+  checksum. dbsnap checks that the clone exists before restore.
+- PostgreSQL restore is not atomic; an interruption can require manual
+  recovery from a safety snapshot. The built-in PostgreSQL driver uses `NoTls`
+  and does not yet support certificate-verified TLS.
 
 dbsnap is intended for development workflows. Keep independent backups for
 data you cannot afford to lose.

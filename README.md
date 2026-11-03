@@ -115,6 +115,8 @@ dbsnap status                   # binding, engine info, disk usage
 dbsnap list --json              # machine-readable snapshot catalog
 dbsnap status --json            # machine-readable database status
 dbsnap diff before after        # SQLite schema and table row counts
+dbsnap pin "golden seed"        # protect a snapshot from pruning
+dbsnap unpin "golden seed"      # remove prune protection
 ```
 
 `diff` currently supports SQLite snapshots; it does not compare individual row contents.
@@ -151,13 +153,18 @@ Add to your MCP config (`.cursor/mcp.json`, Claude Desktop, Windsurf, …):
 
 or without a global install: `"command": "npx", "args": ["-y", "@farhan0431/db-snap", "mcp"]`.
 
-The agent gets five tools:
+The agent gets six tools:
+
+Restore and prune are disabled by default in MCP. An operator can enable them
+for a server session by adding `--allow-destructive` to the MCP command arguments.
+This setting is not a per-operation approval prompt.
 
 | Tool | What it tells the agent |
 | :--- | :--- |
 | `dbsnap_create_snapshot` | **MUST be called before** any migration, DDL, or bulk data change. |
 | `dbsnap_restore_snapshot` | Call **immediately** when a migration fails or data looks wrong. Current state is kept as a safety snapshot first. |
 | `dbsnap_list_snapshots` | Show available restore points. |
+| `dbsnap_diff` | Compare two SQLite snapshots' schema and row counts. |
 | `dbsnap_prune` | Remove older snapshots, retaining at least one, when requested by the user. |
 | `dbsnap_status` | Show which database is protected before touching anything. |
 
@@ -173,14 +180,19 @@ apply it across every project. The canonical copy lives in
 
 ## Safety guarantees (the "don't wreck my project" list)
 
-- **Local-only by default.** Only `localhost` / private-network databases can
-  be touched; anything else is refused unless you pass `--allow-remote`. The
-  MCP server is hard-wired local-only — an agent cannot aim it at production.
+- **Host guard.** MCP accepts SQLite and loopback database hosts only. The CLI
+  also allows private-network addresses by default; other addresses require
+  `--allow-remote`. A loopback address alone does not prove a database is safe.
+- **PostgreSQL network connections:** the built-in driver currently uses
+  `NoTls`. Do not use it over untrusted networks; verified TLS is not yet supported.
 - **Project binding.** `.dbsnap/config.json` fingerprints your database;
   restoring a snapshot into a *different* project's database is refused
   (`--force` to override deliberately).
-- **Verify before restore.** Every snapshot is blake3-hashed on write and
-  re-verified before a single byte touches your live database.
+- **Verify before restore.** SQLite chunks and dump artifacts are checked
+  before restore. A PostgreSQL server-side clone is checked for existence;
+  its metadata fingerprint is not a checksum of the database contents.
+- **PostgreSQL restore is not atomic.** Interruption between dropping the target
+  and renaming its clone may require manual recovery from the safety snapshot.
 - **Automatic safety snapshot** before every restore — a failed restore always
   leaves a one-command way back.
 - **Atomic everything.** Metadata writes are atomic, operations are guarded by

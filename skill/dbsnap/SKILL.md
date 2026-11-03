@@ -46,11 +46,12 @@ project root; `--db <path>` overrides the bound database).
 `postgres://user@localhost:5432/app_dev`). The `.dbsnap/config.json`
 fingerprint binds the project; operating on a **different** database is
 refused (deliberate override: `--force`, or re-run `dbsnap init`). The MCP
-server is **local-only** — it cannot target remote/production databases.
+server allows SQLite and loopback hosts only; a local database may still contain important data.
+MCP restore and prune are disabled unless the server is started with `--allow-destructive`.
 
 ## Safety model (what you may rely on)
 
-- Restores are verified (blake3 per chunk / per dump) before touching the
+- SQLite chunks and dump files are verified before touching the
   live database; a corrupt snapshot is refused, never applied.
 - Every restore first saves the current state as an `auto-before-restore-*`
   snapshot (kept: last 3). Quoted in the output as a one-command way back.

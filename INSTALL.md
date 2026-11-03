@@ -81,14 +81,15 @@ Same JSON as Cursor (Settings → Developer → Edit Config).
 
 ## Step 3 — verify
 
-Restart the client, then check the five tools appear:
+Restart the client, then check the six tools appear:
 `dbsnap_status`, `dbsnap_create_snapshot`, `dbsnap_restore_snapshot`,
-`dbsnap_list_snapshots`, `dbsnap_prune`. Call `dbsnap_status` once — it prints which local
+`dbsnap_list_snapshots`, `dbsnap_diff`, `dbsnap_prune`. Call `dbsnap_status` once — it prints which local
 database is protected.
 
-> Security note: the MCP server is hard-wired **local-only**. It cannot
-> target remote/production databases, and it never exposes database
-> credentials in tool results.
+> Security note: MCP permits SQLite and loopback database hosts only. A local
+> database can still contain important data; verify the target before restore.
+> Restore and prune require starting the server with `--allow-destructive`;
+> this enables them for the session and does not provide per-operation approval.
 
 ## CLI cheat sheet (no MCP needed)
 

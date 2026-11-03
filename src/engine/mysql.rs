@@ -228,6 +228,7 @@ impl MysqlEngine {
                             original_bytes,
                             blake3: hash,
                             method: "mysql-dump".to_string(),
+                            pinned: false,
                             source_state: None,
                         },
                         linked: false,
@@ -342,6 +343,18 @@ impl MysqlEngine {
                 let hint = Self::safety_hint(&safety);
                 bail!("could not run {exec_bin}: {e}{hint}");
             }
+        }
+        let verified = self
+            .sql(
+                &exec_bin,
+                &format!(
+                    "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE schema_name = {};",
+                    Self::quote_lit(&self.target.database)
+                ),
+            )
+            .context("restore applied but MySQL database verification failed")?;
+        if verified.trim() != "1" {
+            bail!("restore applied but the target MySQL database was not found");
         }
         Ok(RestoreOutcome { safety })
     }

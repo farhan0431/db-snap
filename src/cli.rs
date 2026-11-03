@@ -94,6 +94,18 @@ pub enum Command {
         #[arg(long)]
         db: Option<String>,
     },
+    /// Protect a snapshot from pruning
+    Pin {
+        tag_or_id: String,
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Remove snapshot pruning protection
+    Unpin {
+        tag_or_id: String,
+        #[arg(long)]
+        db: Option<String>,
+    },
     /// Delete old snapshots, keeping only the newest N
     Prune {
         /// How many snapshots to keep
@@ -109,5 +121,8 @@ pub enum Command {
     Mcp {
         #[arg(long)]
         db: Option<String>,
+        /// Enable destructive MCP tools for this server session
+        #[arg(long)]
+        allow_destructive: bool,
     },
 }

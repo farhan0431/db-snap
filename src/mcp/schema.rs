@@ -44,6 +44,19 @@ pub fn tools() -> Value {
             }
         },
         {
+            "name": "dbsnap_diff",
+            "description": "Compare schema and row counts between two existing SQLite snapshots. Does not compare row contents or live database state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "First snapshot ID or tag." },
+                    "to": { "type": "string", "description": "Second snapshot ID or tag." }
+                },
+                "required": ["from", "to"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "dbsnap_prune",
             "description": "Permanently delete older recorded snapshots, retaining at least the requested number of newest snapshots. Use only when the user requests cleanup.",
             "inputSchema": {

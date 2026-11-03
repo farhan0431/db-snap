@@ -8,6 +8,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn mcp_refuses_network_targets_before_creating_project_files() {
+    for url in [
+        "postgres://user@10.0.0.1/app",
+        "postgres://user@192.168.1.5/app",
+        "mysql://user@172.16.0.1/app",
+        "mysql://user@host.docker.internal/app",
+        "mysql://user@127.evil/app",
+        "mysql://user@*/app",
+    ] {
+        let root = temp_root();
+        assert!(ops::mcp_context_at(&root, Some(url)).is_err(), "{url}");
+        assert!(!root.join(".dbsnap").exists(), "{url}");
+    }
+    for url in [
+        "postgres://user@localhost/app",
+        "postgres://user@127.0.0.1/app",
+        "mysql://user@[::1]/app",
+    ] {
+        let db = dbsnap::config::parse_db_string(url, false).unwrap();
+        assert!(dbsnap::config::validate_mcp_target(&db).is_ok(), "{url}");
+    }
+}
+
 fn temp_root() -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("dbsnap-it-{}-{n}", std::process::id()));
@@ -214,18 +238,49 @@ fn mcp_prune_rejects_zero_and_keeps_requested_snapshots() -> Result<()> {
     ops::save_with(&ctx, Some("one".into()), SaveMethod::Clone)?;
     ops::save_with(&ctx, Some("two".into()), SaveMethod::Clone)?;
     let call = |keep| {
-        dbsnap::mcp::handler::handle(
+        dbsnap::mcp::handler::handle_with_policy(
             &ctx,
             &serde_json::json!({
                 "jsonrpc":"2.0", "id":1, "method":"tools/call",
                 "params":{"name":"dbsnap_prune", "arguments":{"keep":keep}}
             }),
+            true,
         )
         .unwrap()
     };
     assert_eq!(call(0)["result"]["isError"], true);
     assert_eq!(ctx.store.load_metadata()?.snapshots.len(), 2);
     assert_eq!(call(1)["result"]["isError"], false);
+    assert_eq!(ctx.store.load_metadata()?.snapshots.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn mcp_denies_destructive_operations_by_default() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 2);
+    let ctx = ops::context_at(&root, db.to_str(), false, false)?;
+    ops::save_with(&ctx, Some("one".into()), SaveMethod::Clone)?;
+    add_rows(&db, 2, 3);
+    for (name, args) in [
+        (
+            "dbsnap_restore_snapshot",
+            serde_json::json!({"tag_or_id":"one"}),
+        ),
+        ("dbsnap_prune", serde_json::json!({"keep":1})),
+    ] {
+        let response = dbsnap::mcp::handler::handle(
+            &ctx,
+            &serde_json::json!({
+                "jsonrpc":"2.0", "id":1, "method":"tools/call",
+                "params":{"name":name, "arguments":args}
+            }),
+        )
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+    }
+    assert_eq!(count_rows(&db), 3);
     assert_eq!(ctx.store.load_metadata()?.snapshots.len(), 1);
     Ok(())
 }
@@ -297,6 +352,50 @@ fn sqlite_diff_compares_schema_and_row_counts_without_changing_live_data() -> Re
     assert!(diff.contains("added table projects"), "{diff}");
     assert!(diff.contains("row contents are not compared"));
     assert_eq!(count_rows(&db), 3);
+    let ctx = ops::context_at(&root, db.to_str(), false, false)?;
+    let response = dbsnap::mcp::handler::handle(
+        &ctx,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "dbsnap_diff", "arguments": { "from": "before", "to": "after" } }
+        }),
+    )
+    .unwrap();
+    assert_eq!(response["result"]["isError"], false);
+    assert!(response.to_string().contains("added table projects"));
+    Ok(())
+}
+
+#[test]
+fn pinned_snapshot_survives_prune_and_new_snapshot_is_not_pinned() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "golden")?;
+    ops::pin_at(&root, db.to_str(), "golden", true)?;
+    save(&root, &db, "new")?;
+    assert!(
+        !record_by_tag(&root, "new").pinned,
+        "linked snapshots must not inherit a pin"
+    );
+    ops::prune_at(&root, db.to_str(), 0)?;
+    assert!(record_by_tag(&root, "golden").pinned);
+    assert_eq!(
+        dbsnap::storage::Storage::find(&root)
+            .unwrap()
+            .load_metadata()?
+            .snapshots
+            .len(),
+        1
+    );
+    ops::pin_at(&root, db.to_str(), "golden", false)?;
+    ops::prune_at(&root, db.to_str(), 0)?;
+    assert!(dbsnap::storage::Storage::find(&root)
+        .unwrap()
+        .load_metadata()?
+        .snapshots
+        .is_empty());
     Ok(())
 }
 
@@ -377,6 +476,45 @@ fn count_objects(dir: &Path) -> (usize, u64) {
         }
     }
     (count, bytes)
+}
+
+#[test]
+fn reordered_manifest_is_rejected_before_restore() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    Connection::open(&db)?
+        .execute_batch("CREATE TABLE big (v BLOB); INSERT INTO big VALUES (randomblob(180000));")?;
+    init(&root, &db)?;
+    save(&root, &db, "original")?;
+    add_rows(&db, 1, 2);
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let record = record_by_tag(&root, "original");
+    let path = store.snapshot_path(&record)?;
+    let mut bytes = fs::read(&path)?;
+    assert!(bytes.len() >= 92);
+    for i in 0..32 {
+        bytes.swap(28 + i, 60 + i);
+    }
+    fs::write(path, bytes)?;
+    let error = restore(&root, &db, Some("original"), false).unwrap_err();
+    assert!(format!("{error:#}").contains("manifest integrity"));
+    assert_eq!(count_rows(&db), 2);
+    Ok(())
+}
+
+#[test]
+fn saving_unchanged_database_rejects_corrupt_existing_chunks() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 2);
+    init(&root, &db)?;
+    save(&root, &db, "first")?;
+    fs::write(first_object(&root), b"corrupted")?;
+    assert!(save(&root, &db, "second").is_err());
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    assert_eq!(store.load_metadata()?.snapshots.len(), 1);
+    Ok(())
 }
 
 #[test]
@@ -527,6 +665,7 @@ fn legacy_file_snapshot_still_restorable() -> Result<()> {
         original_bytes: original,
         blake3: hash,
         method: "sqlite-backup".into(),
+        pinned: false,
         source_state: None,
     });
     store.write_metadata(&meta)?;
@@ -562,6 +701,53 @@ fn fingerprint_mismatch_blocks_without_force() -> Result<()> {
 
     // --force melewati guard
     save_force(&root, &db_b, "x")?;
+    Ok(())
+}
+
+#[test]
+fn catalog_cannot_be_rebound_to_another_database() -> Result<()> {
+    let root = temp_root();
+    let a = root.join("a.db");
+    let b = root.join("b.db");
+    create_db(&a, 1);
+    create_db(&b, 3);
+    init(&root, &a)?;
+    save(&root, &a, "from-a")?;
+    assert!(init(&root, &b).is_err());
+    assert!(save_force(&root, &b, "wrong").is_err());
+    assert!(ops::restore_at(&root, b.to_str(), Some("from-a".into()), true, true, false).is_err());
+    assert_eq!(count_rows(&b), 3);
+    assert_eq!(count_rows(&a), 1);
+    Ok(())
+}
+
+#[test]
+fn tampered_catalog_cannot_delete_files_outside_storage() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "one")?;
+    let target = root.join("important.txt");
+    fs::write(&target, "keep")?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let path = store.root.join("metadata.json");
+    let mut metadata: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    metadata["snapshots"][0]["location"] =
+        serde_json::json!({"kind":"file", "path":"../important.txt"});
+    fs::write(path, serde_json::to_vec(&metadata)?)?;
+    assert!(ops::prune_at(&root, db.to_str(), 0).is_err());
+    assert_eq!(fs::read_to_string(target)?, "keep");
+    Ok(())
+}
+
+#[test]
+fn sqlite_init_does_not_create_a_missing_database() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("missing.sqlite");
+    let result = init(&root, &db)?;
+    assert!(result.contains("unreachable"));
+    assert!(!db.exists());
     Ok(())
 }
 
@@ -607,8 +793,11 @@ fn engine_mismatch_is_rejected() -> Result<()> {
     );
     assert!(result.is_err(), "cross-engine restore must be rejected");
     assert!(
-        result.unwrap_err().to_string().contains("engine mismatch"),
-        "error should explain the engine mismatch"
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("different database"),
+        "error should explain the catalog binding"
     );
     Ok(())
 }
@@ -695,11 +884,13 @@ fn pg_test_url() -> Option<String> {
 
 /// Setiap test PG mendapat database unik sendiri — test berjalan paralel
 /// terhadap server yang sama dan tidak boleh saling menabrak.
-fn pg_setup_test_db(test: &str) -> Option<String> {
+fn pg_setup_test_db(test: &str) -> Result<Option<String>> {
     use std::str::FromStr;
-    let base = pg_test_url()?;
-    let mut parsed = url::Url::parse(&base).ok()?;
-    let cfg = postgres::Config::from_str(&base).ok()?;
+    let Some(base) = pg_test_url() else {
+        return Ok(None);
+    };
+    let mut parsed = url::Url::parse(&base)?;
+    let cfg = postgres::Config::from_str(&base)?;
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dbname = format!(
         "dbsnap_t{}_{}_{}",
@@ -707,14 +898,12 @@ fn pg_setup_test_db(test: &str) -> Option<String> {
         std::process::id(),
         n
     );
-    let mut admin = cfg.connect(postgres::NoTls).ok()?;
-    admin
-        .batch_execute(&format!(
-            "DROP DATABASE IF EXISTS {dbname}; CREATE DATABASE {dbname};"
-        ))
-        .ok()?;
+    let mut admin = cfg.connect(postgres::NoTls)?;
+    admin.batch_execute(&format!(
+        "DROP DATABASE IF EXISTS {dbname}; CREATE DATABASE {dbname};"
+    ))?;
     parsed.set_path(&format!("/{dbname}"));
-    Some(parsed.to_string())
+    Ok(Some(parsed.to_string()))
 }
 
 fn pg_drop_test_db(url: &str) {
@@ -745,7 +934,7 @@ fn pg_count(url: &str) -> Result<i64> {
 
 #[test]
 fn postgres_clone_roundtrip() -> Result<()> {
-    let Some(url) = pg_setup_test_db("clone") else {
+    let Some(url) = pg_setup_test_db("clone")? else {
         return Ok(());
     };
     let root = temp_root();
@@ -758,6 +947,8 @@ fn postgres_clone_roundtrip() -> Result<()> {
 
     init(&root, Path::new(&url))?;
     save(&root, Path::new(&url), "pgv1")?;
+    let listing = ops::list_json_at(&root, Some(&url))?;
+    assert!(listing.contains("metadata_fingerprint_not_content_checksum"));
 
     // "migrasi" destruktif
     pg_exec(&url, "ALTER TABLE items DROP COLUMN v;")?;
@@ -789,7 +980,7 @@ fn postgres_clone_roundtrip() -> Result<()> {
 
 #[test]
 fn postgres_dump_roundtrip() -> Result<()> {
-    let Some(url) = pg_setup_test_db("dump") else {
+    let Some(url) = pg_setup_test_db("dump")? else {
         return Ok(());
     };
     // pg_dump/pg_restore harus ada di PATH

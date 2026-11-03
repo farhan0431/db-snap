@@ -114,6 +114,24 @@ impl Storage {
         self.objects_dir().join(&hex[..2]).join(hex)
     }
 
+    pub fn checked_chunk_path(&self, hex: &str) -> Result<PathBuf> {
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("invalid chunk hash");
+        }
+        let root = self.objects_dir();
+        let dir = root.join(&hex[..2]);
+        let path = dir.join(hex);
+        for part in [&root, &dir, &path] {
+            match fs::symlink_metadata(part) {
+                Ok(meta) if meta.file_type().is_symlink() => bail!("chunk path contains a symlink"),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(path)
+    }
+
     pub fn has_chunk(&self, hex: &str) -> bool {
         self.chunk_path(hex).exists()
     }
@@ -121,7 +139,7 @@ impl Storage {
     /// Write a chunk (zstd-compressed, atomic rename) unless it already
     /// exists. Returns Some(compressed_len) when actually written.
     pub fn write_chunk_if_missing(&self, hex: &str, data: &[u8]) -> Result<Option<u64>> {
-        let path = self.chunk_path(hex);
+        let path = self.checked_chunk_path(hex)?;
         if path.exists() {
             return Ok(None);
         }
@@ -136,7 +154,7 @@ impl Storage {
     /// Read + decompress a chunk, verifying its content against its
     /// content-addressed name (per-chunk integrity, design §4-T3).
     pub fn read_chunk_verified(&self, hex: &str) -> Result<Vec<u8>> {
-        let path = self.chunk_path(hex);
+        let path = self.checked_chunk_path(hex)?;
         if !path.exists() {
             bail!(
                 "delta object {hex} is missing — the .dbsnap store is incomplete; do not delete .dbsnap/objects manually"
@@ -166,8 +184,8 @@ impl Storage {
     }
 
     pub fn read_manifest_file(&self, rel: &str) -> Result<Manifest> {
-        let bytes =
-            fs::read(self.root.join(rel)).with_context(|| format!("reading manifest {rel}"))?;
+        let bytes = fs::read(self.checked_artifact_path(rel, "manifests")?)
+            .with_context(|| format!("reading manifest {rel}"))?;
         Manifest::from_bytes(&bytes).with_context(|| format!("parsing manifest {rel}"))
     }
 }
@@ -206,6 +224,10 @@ pub fn save_delta(
     let content_id = content_hasher.finalize().to_hex().to_string();
 
     if Some(content_id.as_str()) == prev_content_id {
+        for h in &hashes {
+            let hex = blake3::Hash::from_bytes(*h).to_hex().to_string();
+            store.read_chunk_verified(&hex)?;
+        }
         return Ok(DeltaOutcome::Identical { content_id });
     }
 
@@ -213,7 +235,8 @@ pub fn save_delta(
     let mut written_bytes = 0u64;
     for (i, h) in hashes.iter().enumerate() {
         let hex = blake3::Hash::from_bytes(*h).to_hex().to_string();
-        if store.has_chunk(&hex) {
+        if store.checked_chunk_path(&hex)?.exists() {
+            store.read_chunk_verified(&hex)?;
             continue;
         }
         let len = std::cmp::min(CHUNK_SIZE as u64, total - offsets[i]) as usize;
@@ -255,8 +278,30 @@ fn read_full(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
 
 /// Reassemble a manifest into a staged database file, verifying every chunk
 /// on the way. Returns the staged path and the reconstructed size.
-pub fn stage_from_manifest(store: &Storage, rel: &str, id: &str) -> Result<(PathBuf, u64)> {
+pub fn verify_manifest(manifest: &Manifest, expected_hash: &str, expected_size: u64) -> Result<()> {
+    let mut hasher = blake3::Hasher::new();
+    for hash in &manifest.hashes {
+        hasher.update(hash);
+    }
+    if hasher.finalize().to_hex().as_str() != expected_hash
+        || manifest.original_size != expected_size
+        || manifest.page_size != PAGE_SIZE
+        || manifest.chunk_pages != CHUNK_PAGES
+    {
+        bail!("manifest integrity check failed: snapshot metadata does not match manifest");
+    }
+    Ok(())
+}
+
+pub fn stage_from_manifest(
+    store: &Storage,
+    rel: &str,
+    id: &str,
+    expected_hash: &str,
+    expected_size: u64,
+) -> Result<(PathBuf, u64)> {
     let manifest = store.read_manifest_file(rel)?;
+    verify_manifest(&manifest, expected_hash, expected_size)?;
     let staged = store.tmp_dir().join(format!("restore-{id}.db"));
     let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&staged)?);
     let mut total = 0u64;

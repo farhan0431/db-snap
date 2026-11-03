@@ -4,6 +4,10 @@ use serde_json::{json, Value};
 
 /// Handle one JSON-RPC message. Returns `None` for notifications (no reply).
 pub fn handle(ctx: &Ctx, msg: &Value) -> Option<Value> {
+    handle_with_policy(ctx, msg, false)
+}
+
+pub fn handle_with_policy(ctx: &Ctx, msg: &Value, allow_destructive: bool) -> Option<Value> {
     let method = msg.get("method")?.as_str()?;
     let id = msg.get("id").cloned();
     let is_request = matches!(id, Some(ref v) if !v.is_null());
@@ -22,7 +26,7 @@ pub fn handle(ctx: &Ctx, msg: &Value) -> Option<Value> {
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": schema::tools() })),
-        "tools/call" => tools_call(ctx, msg.get("params")),
+        "tools/call" => tools_call(ctx, msg.get("params"), allow_destructive),
         other => Err((-32601, format!("Method not found: {other}"))),
     };
 
@@ -43,10 +47,18 @@ fn negotiated_version(msg: &Value) -> String {
     }
 }
 
-fn tools_call(ctx: &Ctx, params: Option<&Value>) -> Result<Value, (i64, String)> {
+fn tools_call(
+    ctx: &Ctx,
+    params: Option<&Value>,
+    allow_destructive: bool,
+) -> Result<Value, (i64, String)> {
     let params = params.cloned().unwrap_or(Value::Null);
     let name = params["name"].as_str().unwrap_or_default().to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    if !allow_destructive && matches!(name.as_str(), "dbsnap_restore_snapshot" | "dbsnap_prune") {
+        return Ok(error_result("destructive MCP tools are disabled; explicitly start the server with --allow-destructive to enable them"));
+    }
 
     let tool_result: Result<String, anyhow::Error> = match name.as_str() {
         "dbsnap_create_snapshot" => {
@@ -64,6 +76,12 @@ fn tools_call(ctx: &Ctx, params: Option<&Value>) -> Result<Value, (i64, String)>
             ops::restore_with(ctx, id, true)
         }
         "dbsnap_list_snapshots" => ops::list_with(ctx),
+        "dbsnap_diff" => {
+            let (Some(from), Some(to)) = (args["from"].as_str(), args["to"].as_str()) else {
+                return Ok(error_result("from and to must be snapshot IDs or tags"));
+            };
+            ops::diff_with(ctx, from, to)
+        }
         "dbsnap_prune" => {
             let Some(keep) = args["keep"]
                 .as_u64()
@@ -77,7 +95,7 @@ fn tools_call(ctx: &Ctx, params: Option<&Value>) -> Result<Value, (i64, String)>
         "dbsnap_status" => ops::status_with(ctx),
         other => {
             return Ok(error_result(&format!(
-                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_prune, dbsnap_status"
+                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_diff, dbsnap_prune, dbsnap_status"
             )));
         }
     };

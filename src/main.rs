@@ -71,11 +71,16 @@ fn run(command: Command) -> i32 {
             }
         }
         Command::Diff { from, to, db } => ops::diff_at(&root, db.as_deref(), &from, &to),
+        Command::Pin { tag_or_id, db } => ops::pin_at(&root, db.as_deref(), &tag_or_id, true),
+        Command::Unpin { tag_or_id, db } => ops::pin_at(&root, db.as_deref(), &tag_or_id, false),
         Command::Prune { keep, all, db } => {
             ops::prune_at(&root, db.as_deref(), if all { 0 } else { keep })
         }
-        Command::Mcp { db } => {
-            return match mcp::run(db.as_deref()) {
+        Command::Mcp {
+            db,
+            allow_destructive,
+        } => {
+            return match mcp::run(db.as_deref(), allow_destructive) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!(

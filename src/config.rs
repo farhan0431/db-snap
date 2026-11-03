@@ -41,9 +41,14 @@ impl ServerTarget {
     /// libpq-style connstring for spawned clients — no password field; the
     /// password travels via PGPASSWORD env instead (design §4-T10).
     pub fn connstring(&self) -> String {
+        let host = if self.host.eq_ignore_ascii_case("localhost") {
+            "127.0.0.1"
+        } else {
+            &self.host
+        };
         format!(
             "host={} port={} user={} dbname={}",
-            self.host, self.port, self.user, self.database
+            host, self.port, self.user, self.database
         )
     }
 }
@@ -295,23 +300,29 @@ pub fn is_local_host(host: &str) -> bool {
     if h.eq_ignore_ascii_case("localhost") || h.eq_ignore_ascii_case("host.docker.internal") {
         return true;
     }
-    if h == "::1" || h == "*" {
-        return true;
+    match h.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+        Err(_) => false,
     }
-    if let Some(octets) = h.strip_prefix("127.").map(|s| s.split('.')) {
-        return octets.count() >= 1;
+}
+
+/// MCP only accepts literal loopback addresses or localhost. Avoid DNS-based
+/// allowlists: the connection must not resolve to a private network server.
+pub fn validate_mcp_target(db: &ResolvedDb) -> Result<()> {
+    let target = match &db.target {
+        DbTarget::Sqlite(_) => return Ok(()),
+        DbTarget::Postgres(target) | DbTarget::Mysql(target) => target,
+    };
+    let host = target.host.trim_matches(&['[', ']'][..]);
+    if host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return Ok(());
     }
-    for prefix in ["10.", "192.168."] {
-        if h.starts_with(prefix) {
-            return true;
-        }
-    }
-    if let Some(rest) = h.strip_prefix("172.") {
-        if let Ok(second) = rest.split('.').next().unwrap_or("").parse::<u32>() {
-            return (16..=31).contains(&second);
-        }
-    }
-    false
+    bail!("MCP only permits loopback database hosts; network and wildcard targets are refused")
 }
 
 #[cfg(test)]
@@ -369,7 +380,7 @@ mod tests {
         assert!(!db.fingerprint().target.contains("secret"));
         assert_eq!(
             pg.connstring(),
-            "host=localhost port=5433 user=dev dbname=app_dev"
+            "host=127.0.0.1 port=5433 user=dev dbname=app_dev"
         );
     }
 
@@ -418,6 +429,9 @@ mod tests {
         assert!(is_local_host("172.31.255.255"));
         assert!(is_local_host("host.docker.internal"));
         assert!(!is_local_host("db.example.com"));
+        assert!(!is_local_host("127.evil.example"));
+        assert!(!is_local_host("10.evil.example"));
+        assert!(!is_local_host("*"));
         assert!(!is_local_host("172.32.0.1"));
         assert!(!is_local_host("8.8.8.8"));
     }

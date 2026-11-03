@@ -112,8 +112,9 @@ impl SqliteEngine {
     }
 
     fn open_live(&self) -> Result<Connection> {
-        let conn = Connection::open(&self.path)
-            .with_context(|| format!("opening database {}", self.path.display()))?;
+        let conn =
+            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .with_context(|| format!("opening database {}", self.path.display()))?;
         conn.busy_timeout(Duration::from_secs(5))?;
         Ok(conn)
     }
@@ -144,7 +145,7 @@ impl SqliteEngine {
     fn stage(&self, store: &Storage, record: &SnapshotRecord) -> Result<PathBuf> {
         match &record.location {
             Location::File { path } => {
-                let src = store.root.join(path);
+                let src = store.checked_artifact_path(path, "snapshots")?;
                 if !src.exists() {
                     bail!(
                         "snapshot file {} is missing on disk — the snapshot catalog may be out of sync",
@@ -158,7 +159,7 @@ impl SqliteEngine {
             Location::Manifest { path } => {
                 // Reassembles from the chunk store, verifying every chunk
                 // (per-chunk integrity, design §4-T3).
-                let (staged, _) = cas::stage_from_manifest(store, path, &record.id)?;
+                let (staged, _) = cas::stage_from_manifest(store, path, &record.id, &record.blake3, record.original_bytes)?;
                 Ok(staged)
             }
             Location::PgDatabase { .. } => bail!(
@@ -190,7 +191,9 @@ impl DatabaseEngine for SqliteEngine {
         let version: String = conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
         let journal: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         let mut size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
-        let wal = self.path.with_extension("db-wal");
+        let mut wal = self.path.as_os_str().to_os_string();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
         if let Ok(m) = std::fs::metadata(&wal) {
             size += m.len();
         }
@@ -249,9 +252,15 @@ impl DatabaseEngine for SqliteEngine {
                 let Some(prev) = previous else {
                     bail!("identical content reported without a previous snapshot");
                 };
+                let Location::Manifest { path } = &prev.location else {
+                    bail!("cannot reuse a non-manifest snapshot");
+                };
+                let manifest = store.read_manifest_file(path)?;
+                cas::verify_manifest(&manifest, &prev.blake3, prev.original_bytes)?;
                 let mut record = prev.clone();
                 record.id = id;
                 record.tag = tag.to_string();
+                record.pinned = false;
                 record.created_at = Utc::now();
                 Ok(SaveOutcome {
                     record,
@@ -277,6 +286,7 @@ impl DatabaseEngine for SqliteEngine {
                         original_bytes: original_size,
                         blake3: content_id,
                         method: "sqlite-delta".to_string(),
+                        pinned: false,
                         source_state: current_state,
                     },
                     linked: false,
@@ -336,6 +346,15 @@ impl DatabaseEngine for SqliteEngine {
             bail!("restore failed: {e:#}{hint}");
         }
         std::fs::remove_file(&staged).ok();
+        let conn = self
+            .open_live()
+            .context("restore applied but verification could not open the database")?;
+        let check: String = conn
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+            .context("restore applied but SQLite verification failed")?;
+        if check != "ok" {
+            bail!("restore applied but SQLite quick_check failed: {check}");
+        }
         Ok(RestoreOutcome { safety })
     }
 }

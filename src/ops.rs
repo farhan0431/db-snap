@@ -41,6 +41,7 @@ pub fn context_at(
     let db = config::resolve_at(&project_root, explicit, allow_remote)?;
     let fingerprint = db.fingerprint();
     if let Some(store) = existing {
+        ensure_catalog_binding(&store, &fingerprint)?;
         let bound = store.load_config()?;
         if bound != fingerprint {
             if !force {
@@ -52,6 +53,8 @@ pub fn context_at(
                     fingerprint.target
                 );
             }
+            let _lock = store.lock()?;
+            ensure_catalog_binding(&store, &fingerprint)?;
             let store = Storage::create(&project_root, &fingerprint)?;
             return Ok(Ctx { db, store });
         }
@@ -60,6 +63,34 @@ pub fn context_at(
         let store = Storage::create(root, &fingerprint)?;
         Ok(Ctx { db, store })
     }
+}
+
+fn ensure_catalog_binding(store: &Storage, fingerprint: &config::Fingerprint) -> Result<()> {
+    let meta = store.load_metadata()?;
+    if store.root.join("metadata.json").exists() && meta.project_fingerprint != *fingerprint {
+        bail!("the snapshot catalog belongs to a different database; refusing to rebind or use its snapshots. Use a separate project directory for the new database");
+    }
+    Ok(())
+}
+
+fn ensure_active_binding(ctx: &Ctx) -> Result<()> {
+    let fingerprint = ctx.db.fingerprint();
+    if ctx.store.load_config()? != fingerprint {
+        bail!("the project binding changed; restart the operation and verify the database target");
+    }
+    ensure_catalog_binding(&ctx.store, &fingerprint)
+}
+
+/// Check the MCP target before creating or changing any project files.
+pub fn mcp_context_at(root: &Path, explicit: Option<&str>) -> Result<Ctx> {
+    let existing = Storage::find(root);
+    let project_root = existing
+        .as_ref()
+        .and_then(|s| s.root.parent())
+        .unwrap_or(root);
+    let db = config::resolve_at(project_root, explicit, false)?;
+    config::validate_mcp_target(&db)?;
+    context_at(root, explicit, false, false)
 }
 
 /// Final redaction layer for every public command: passwords parsed from
@@ -81,6 +112,10 @@ pub fn init_at(root: &Path, explicit: Option<&str>, allow_remote: bool) -> Resul
             .unwrap_or(root);
         let db = config::resolve_at(project_root, explicit, allow_remote)?;
         let fingerprint = db.fingerprint();
+        let _lock = existing.as_ref().map(Storage::lock).transpose()?;
+        if let Some(store) = &existing {
+            ensure_catalog_binding(store, &fingerprint)?;
+        }
         let existed = existing.is_some();
         let store = Storage::create(project_root, &fingerprint)?;
 
@@ -151,6 +186,7 @@ pub fn save_at(
 
 pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> Result<String> {
     let _lock = ctx.store.lock()?;
+    ensure_active_binding(ctx)?;
     let tag = match tag {
         Some(t) => {
             util::validate_tag(&t)?;
@@ -212,6 +248,7 @@ pub fn restore_at(
 
 pub fn restore_with(ctx: &Ctx, id_or_tag: Option<String>, safety: bool) -> Result<String> {
     let _lock = ctx.store.lock()?;
+    ensure_active_binding(ctx)?;
     let meta = ctx.store.load_metadata()?;
     let record = meta.find(id_or_tag.as_deref())?;
     if record.engine != ctx.db.engine.to_string() {
@@ -266,7 +303,7 @@ fn prune_auto_snapshots(
     let mut autos: Vec<SnapshotRecord> = meta
         .snapshots
         .iter()
-        .filter(|s| s.tag.starts_with("auto-before-restore-"))
+        .filter(|s| s.tag.starts_with("auto-before-restore-") && !s.pinned)
         .cloned()
         .collect();
     if autos.len() <= AUTO_SAFETY_KEEP {
@@ -276,7 +313,33 @@ fn prune_auto_snapshots(
     let victims: Vec<SnapshotRecord> = autos.split_off(AUTO_SAFETY_KEEP);
     meta.snapshots
         .retain(|s| !victims.iter().any(|v| v.id == s.id));
+    validate_prune_survivors(store, meta, &victims)?;
+    store.write_metadata(meta)?;
     remove_records(store, meta, &victims, pg)?;
+    Ok(())
+}
+
+fn validate_prune_survivors(
+    store: &Storage,
+    survivors: &Metadata,
+    victims: &[SnapshotRecord],
+) -> Result<()> {
+    if victims
+        .iter()
+        .any(|v| matches!(v.location, crate::storage::Location::Manifest { .. }))
+    {
+        for snapshot in &survivors.snapshots {
+            if let crate::storage::Location::Manifest { path } = &snapshot.location {
+                let manifest = store.read_manifest_file(path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "cannot safely prune: survivor manifest {path} cannot be read: {e:#}"
+                    )
+                })?;
+                crate::storage::cas::verify_manifest(&manifest, &snapshot.blake3, snapshot.original_bytes)
+                    .map_err(|e| anyhow::anyhow!("cannot safely prune: survivor manifest {path} failed integrity check: {e:#}"))?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -328,7 +391,7 @@ fn remove_records(
         match &v.location {
             crate::storage::Location::File { path } => {
                 if !survivor_files.contains(path.as_str())
-                    && fs::remove_file(store.root.join(path)).is_ok()
+                    && fs::remove_file(store.checked_artifact_path(path, "snapshots")?).is_ok()
                 {
                     freed += v.size_bytes;
                 }
@@ -339,7 +402,7 @@ fn remove_records(
                     if let Ok(m) = store.read_manifest_file(path) {
                         for hex in m.hexes() {
                             if !survivor_chunks.contains(&hex) {
-                                let chunk = store.chunk_path(&hex);
+                                let chunk = store.checked_chunk_path(&hex)?;
                                 if let Ok(md) = fs::metadata(&chunk) {
                                     let size = md.len();
                                     if fs::remove_file(&chunk).is_ok() {
@@ -349,7 +412,7 @@ fn remove_records(
                             }
                         }
                     }
-                    fs::remove_file(store.root.join(path)).ok();
+                    fs::remove_file(store.checked_artifact_path(path, "manifests")?).ok();
                 }
             }
             crate::storage::Location::PgDatabase { name } => {
@@ -383,31 +446,50 @@ pub fn list_at(root: &Path, explicit: Option<&str>) -> Result<String> {
 pub fn diff_at(root: &Path, explicit: Option<&str>, from: &str, to: &str) -> Result<String> {
     redact((|| {
         let ctx = context_at(root, explicit, false, false)?;
-        let _lock = ctx.store.lock()?;
-        let meta = ctx.store.load_metadata()?;
-        let left = meta.find(Some(from))?;
-        let right = meta.find(Some(to))?;
-        match &ctx.db.target {
-            DbTarget::Sqlite(path) if left.engine == "sqlite" && right.engine == "sqlite" => {
-                engine::sqlite::SqliteEngine::new(path.clone()).diff(&ctx.store, &left, &right)
-            }
-            _ => bail!("snapshot diff currently supports SQLite snapshots only"),
-        }
+        diff_with(&ctx, from, to)
     })())
+}
+
+pub fn diff_with(ctx: &Ctx, from: &str, to: &str) -> Result<String> {
+    let _lock = ctx.store.lock()?;
+    ensure_active_binding(ctx)?;
+    let meta = ctx.store.load_metadata()?;
+    let left = meta.find(Some(from))?;
+    let right = meta.find(Some(to))?;
+    match &ctx.db.target {
+        DbTarget::Sqlite(path) if left.engine == "sqlite" && right.engine == "sqlite" => {
+            engine::sqlite::SqliteEngine::new(path.clone()).diff(&ctx.store, &left, &right)
+        }
+        _ => bail!("snapshot diff currently supports SQLite snapshots only"),
+    }
 }
 
 pub fn list_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
     redact((|| {
         let ctx = context_at(root, explicit, false, false)?;
         let _lock = ctx.store.lock()?;
+        ensure_active_binding(&ctx)?;
         let mut snapshots = ctx.store.load_metadata()?.snapshots;
         snapshots.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        let snapshots: Vec<serde_json::Value> = snapshots
+            .iter()
+            .map(|snapshot| {
+                let mut value = serde_json::to_value(snapshot)?;
+                value["integrity_kind"] = serde_json::json!(if snapshot.method == "pg-clone" {
+                    "metadata_fingerprint_not_content_checksum"
+                } else {
+                    "content_checksum"
+                });
+                Ok::<_, serde_json::Error>(value)
+            })
+            .collect::<std::result::Result<_, _>>()?;
         Ok(serde_json::to_string(&snapshots)?)
     })())
 }
 
 pub fn list_with(ctx: &Ctx) -> Result<String> {
     let _lock = ctx.store.lock()?;
+    ensure_active_binding(ctx)?;
     let meta = ctx.store.load_metadata()?;
     if meta.snapshots.is_empty() {
         return Ok("no snapshots yet — create one with: dbsnap save \"my-tag\"".to_string());
@@ -416,7 +498,16 @@ pub fn list_with(ctx: &Ctx) -> Result<String> {
     snaps.sort_by_key(|a| std::cmp::Reverse(a.created_at));
 
     let mut ids: Vec<String> = snaps.iter().map(|s| s.id.clone()).collect();
-    let mut tags: Vec<String> = snaps.iter().map(|s| s.tag.clone()).collect();
+    let mut tags: Vec<String> = snaps
+        .iter()
+        .map(|s| {
+            if s.pinned {
+                format!("[PINNED] {}", s.tag)
+            } else {
+                s.tag.clone()
+            }
+        })
+        .collect();
     let mut createds: Vec<String> = snaps
         .iter()
         .map(|s| util::relative_time(s.created_at))
@@ -459,6 +550,9 @@ pub fn list_with(ctx: &Ctx) -> Result<String> {
         ));
     }
     out.pop();
+    if snaps.iter().any(|s| s.method == "pg-clone") {
+        out.push_str("\nPostgreSQL clones have a metadata fingerprint, not a content checksum.");
+    }
     Ok(out)
 }
 
@@ -471,6 +565,7 @@ pub fn prune_at(root: &Path, explicit: Option<&str>, keep: usize) -> Result<Stri
 
 pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
     let _lock = ctx.store.lock()?;
+    ensure_active_binding(ctx)?;
     let mut meta = ctx.store.load_metadata()?;
     meta.snapshots
         .sort_by_key(|a| std::cmp::Reverse(a.created_at));
@@ -478,7 +573,12 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
     let mut freed = 0u64;
     let mut removed = 0usize;
     if keep < meta.snapshots.len() {
-        let victims: Vec<SnapshotRecord> = meta.snapshots.split_off(keep);
+        let candidates = meta.snapshots.split_off(keep);
+        let (protected, victims): (Vec<SnapshotRecord>, Vec<SnapshotRecord>) =
+            candidates.into_iter().partition(|s| s.pinned);
+        meta.snapshots.extend(protected);
+        validate_prune_survivors(&ctx.store, &meta, &victims)?;
+        ctx.store.write_metadata(&meta)?;
         let (n, f) = remove_records(&ctx.store, &meta, &victims, pg_target(&ctx.db))?;
         removed = n;
         freed = f;
@@ -499,6 +599,28 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
     }
 }
 
+pub fn pin_at(root: &Path, explicit: Option<&str>, selector: &str, pinned: bool) -> Result<String> {
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        ensure_active_binding(&ctx)?;
+        let mut meta = ctx.store.load_metadata()?;
+        let record = meta.find(Some(selector))?;
+        let snapshot = meta
+            .snapshots
+            .iter_mut()
+            .find(|s| s.id == record.id)
+            .expect("record came from metadata");
+        snapshot.pinned = pinned;
+        ctx.store.write_metadata(&meta)?;
+        Ok(format!(
+            "snapshot {} {}",
+            record.id,
+            if pinned { "pinned" } else { "unpinned" }
+        ))
+    })())
+}
+
 pub fn status_at(root: &Path, explicit: Option<&str>) -> Result<String> {
     redact((|| {
         let ctx = context_at(root, explicit, false, false)?;
@@ -510,6 +632,7 @@ pub fn status_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
     redact((|| {
         let ctx = context_at(root, explicit, false, false)?;
         let _lock = ctx.store.lock()?;
+        ensure_active_binding(&ctx)?;
         let info = engine::make(&ctx.db)?.probe()?;
         let meta = ctx.store.load_metadata()?;
         let (chunks, chunk_bytes) = scan_dir_size(&ctx.store.objects_dir());
@@ -528,6 +651,7 @@ pub fn status_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
 
 pub fn status_with(ctx: &Ctx) -> Result<String> {
     let _lock = ctx.store.lock()?;
+    ensure_active_binding(ctx)?;
     let meta = ctx.store.load_metadata()?;
     let engine = engine::make(&ctx.db)?;
     let info = engine.probe()?;

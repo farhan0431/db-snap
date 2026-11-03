@@ -13,24 +13,24 @@ boundaries, and how to report problems.
 
 ## The guarantees (and where they live)
 
-All of these are specified in [docs/DESIGN.md](docs/DESIGN.md) §4 (threat
-model) and enforced by code plus tests:
+The following controls are described in [docs/DESIGN.md](docs/DESIGN.md) §4.
+They do not constitute a security audit or a production backup guarantee:
 
-1. **Local-only by default (T1).** Only localhost/private-network database
-   targets are accepted. Remote targets require the human to pass
-   `--allow-remote` on the CLI. The MCP server is hard-wired local-only —
-   an AI agent has no path to a remote target.
+1. **Host guard (T1).** MCP accepts SQLite and loopback database hosts. The
+   CLI also accepts private-network targets; other hosts require `--allow-remote`.
+   Loopback does not prove a target is non-production or prevent tunneling.
 2. **Project binding (T2).** `.dbsnap/config.json` fingerprints the bound
    database; snapshots cannot be restored into a different database without
    an explicit `--force`.
-3. **Verify before restore (T3).** Every snapshot is hashed (blake3) on
-   write and re-verified per chunk/dump before a single byte touches the
-   live database.
-4. **Safety snapshots (T7).** Every restore first preserves the current
-   state and persists the record before any destructive step.
-5. **Surgical pruning (T13).** Deletions only ever touch artifacts recorded
-   in metadata; server-side drops only ever touch databases under the
-   `__dbsnap_` prefix.
+3. **Verify before restore (T3).** SQLite manifests/chunks and dump artifacts
+   are checked before restore. PostgreSQL clone fingerprints do not verify
+   database contents.
+4. **Safety snapshots (T7).** Restore creates a safety snapshot by default,
+   unless explicitly disabled on the CLI. A successful snapshot does not make
+   PostgreSQL or MySQL restore atomic.
+5. **Prune boundaries (T13).** Prune uses recorded artifacts and validates
+   artifact paths; server-side clone drops require the `__dbsnap_` prefix.
+   Filesystem path checks are not an OS-level sandbox against concurrent tampering.
 6. **Credential hygiene (T10/T11).** Passwords travel to client binaries via
    environment variables, never argv; they are never written to
    `.dbsnap/`; and every output boundary (CLI, MCP tool results, warnings)
@@ -46,6 +46,11 @@ model) and enforced by code plus tests:
 - Dump-based snapshots (MySQL, `pg_dump`) are logical restores; a
   `--single-transaction` dump is consistent for InnoDB tables, not for
   MyISAM.
+- PostgreSQL clone restore is not atomic and may consume the source snapshot.
+  Interrupted operations can require manual recovery. PostgreSQL connections
+  use `NoTls`; certificate-verified TLS is not implemented.
+- MCP restore and prune are disabled unless the server is started with
+  `--allow-destructive`. There is no per-operation approval mechanism.
 - The masking layer is defense in depth, not a sandbox: an AI agent with
   shell access to your project can read `.env` itself.
 

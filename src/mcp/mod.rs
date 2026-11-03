@@ -9,9 +9,9 @@ use std::io::{BufRead, BufReader, Write};
 /// Run the MCP stdio server: newline-delimited JSON-RPC 2.0 on stdin/stdout.
 /// NOTHING except JSON-RPC responses may be written to stdout — diagnostics
 /// go to stderr (design §6).
-pub fn run(explicit_db: Option<&str>) -> Result<()> {
+pub fn run(explicit_db: Option<&str>, allow_destructive: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let ctx = ops::context_at(&root, explicit_db, false, false)?;
+    let ctx = ops::mcp_context_at(&root, explicit_db)?;
 
     eprintln!(
         "dbsnap mcp {} — serving {} ({})",
@@ -37,7 +37,7 @@ pub fn run(explicit_db: Option<&str>) -> Result<()> {
             continue;
         }
         let response: Option<Value> = match serde_json::from_str(trimmed) {
-            Ok(msg) => handler::handle(&ctx, &msg),
+            Ok(msg) => handler::handle_with_policy(&ctx, &msg, allow_destructive),
             Err(e) => Some(json!({
                 "jsonrpc": "2.0",
                 "id": null,

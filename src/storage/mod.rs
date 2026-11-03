@@ -47,6 +47,8 @@ pub struct SnapshotRecord {
     pub original_bytes: u64,
     pub blake3: String,
     pub method: String,
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_state: Option<SourceState>,
 }
@@ -211,7 +213,55 @@ impl Storage {
             return Ok(Metadata::new(cfg));
         }
         let raw = fs::read_to_string(&path).context("reading .dbsnap/metadata.json")?;
-        serde_json::from_str(&raw).context("parsing .dbsnap/metadata.json")
+        let metadata: Metadata =
+            serde_json::from_str(&raw).context("parsing .dbsnap/metadata.json")?;
+        for record in &metadata.snapshots {
+            if record.id.is_empty()
+                || record.id.len() > 64
+                || !record
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            {
+                bail!("invalid snapshot ID in metadata");
+            }
+            match &record.location {
+                Location::File { path } => {
+                    self.checked_artifact_path(path, "snapshots")?;
+                }
+                Location::Manifest { path } => {
+                    self.checked_artifact_path(path, "manifests")?;
+                }
+                Location::PgDatabase { .. } => {}
+            }
+        }
+        Ok(metadata)
+    }
+
+    pub fn checked_artifact_path(&self, rel: &str, directory: &str) -> Result<PathBuf> {
+        use std::path::Component;
+        if rel.contains('\\') {
+            bail!("invalid snapshot artifact path");
+        }
+        let mut parts = Path::new(rel).components();
+        let valid = matches!(parts.next(), Some(Component::Normal(p)) if p == directory)
+            && matches!(parts.next(), Some(Component::Normal(_)))
+            && parts.next().is_none();
+        if !valid {
+            bail!("invalid snapshot artifact path: {rel:?}");
+        }
+        let dir = self.root.join(directory);
+        for path in [&dir, &self.root.join(rel)] {
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    bail!("snapshot artifact path contains a symlink")
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(self.root.join(rel))
     }
 
     /// Atomic metadata write: temp file then rename (design §4-T4).
@@ -232,7 +282,13 @@ impl Storage {
     /// manifest). Server-side clones have no local file.
     pub fn snapshot_path(&self, record: &SnapshotRecord) -> Result<PathBuf> {
         match record.artifact_rel() {
-            Some(rel) => Ok(self.root.join(rel)),
+            Some(rel) => self.checked_artifact_path(
+                rel,
+                match record.location {
+                    Location::Manifest { .. } => "manifests",
+                    _ => "snapshots",
+                },
+            ),
             None => bail!(
                 "snapshot {} lives inside the PostgreSQL server — no local file",
                 record.id
@@ -337,10 +393,15 @@ mod tests {
             original_bytes: 1,
             blake3: "x".into(),
             method: "sqlite-backup".into(),
+            pinned: false,
             source_state: None,
         });
         assert_eq!(meta.find(Some("a1")).unwrap().id, "a1b2c3");
         assert_eq!(meta.find(Some("before-migration")).unwrap().id, "a1b2c3");
         assert!(meta.find(Some("zzz")).is_err());
+        let mut old = serde_json::to_value(&meta.snapshots[0]).unwrap();
+        old.as_object_mut().unwrap().remove("pinned");
+        let restored: SnapshotRecord = serde_json::from_value(old).unwrap();
+        assert!(!restored.pinned);
     }
 }

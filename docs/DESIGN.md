@@ -209,9 +209,9 @@ DB kecil–menengah (10–200 MB — mayoritas kasus dev) sudah instan di mode f
 
 | # | Ancaman | Mitigasi (status: desain wajib) |
 | :-- | :--- | :--- |
-| T1 | `DATABASE_URL` menunjuk database **remote/production** | **Host guard**: hanya `localhost`, `127.0.0.1`, `::1`, RFC1918 (`10.x`, `172.16–31.x`, `192.168.x`), `host.docker.internal`, unix socket. Selain itu → error keras, kecuali flag `--allow-remote` eksplisit. **Mode MCP: local-only di-hard-code** — tool MCP tidak punya jalur untuk menarget remote, titik. |
+| T1 | `DATABASE_URL` menunjuk database **remote/production** | CLI mengizinkan loopback dan jaringan privat secara default; host lain memerlukan `--allow-remote`. MCP hanya mengizinkan SQLite dan host loopback. Tidak ada pemeriksaan host yang membuktikan database tersebut bukan production. |
 | T2 | Snapshot proyek A di-restore ke database proyek B (agent salah direktori) | `config.json` menyimpan fingerprint; setiap perintah memverifikasi target sekarang ≠ fingerprint → tolak, kecuali `--cross-project` eksplisit. Fingerprint juga tertanam di tiap record snapshot. |
-| T3 | Restore file snapshot yang korup/terpotong → menimpa DB yang sehat dengan sampah | **Verify-before-restore**: decompress ke `tmp/`, hitung blake3, bandingkan metadata — baru satu byte pun menyentuh DB bila valid. |
+| T3 | Restore snapshot yang korup/terpotong | SQLite dan dump diverifikasi sebelum restore. Clone PostgreSQL hanya diperiksa keberadaannya; fingerprint metadata bukan checksum isi. |
 | T4 | Metadata.json sobek (proses mati saat save) | Tulis atomic tmp→rename; file snapshot juga ditulis ke tmp lalu di-rename **setelah** metadata commit. |
 | T5 | Dua proses dbsnap bersamaan (human + agent) | `lock` file via `fs4` — blocking dengan timeout 10 dtk, pesan error jelas siapa yang memegang. MCP server memakai lock yang sama. |
 | T6 | Proses mati di tengah fencing PG (koneksi developer terkunci permanen) | Re-enable `ALLOW_CONNECTIONS` idempoten di awal+akhir tiap operasi PG; `dbsnap status` mendeteksi & memperbaiki sisa fencing. |
