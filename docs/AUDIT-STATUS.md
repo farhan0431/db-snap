@@ -9,7 +9,7 @@ disposable databases; dbsnap is not a production backup system.
 | DB-001 PostgreSQL interrupted restore | Clone and staged-dump cutover use a journal and preserve the old target. Tested process-exit failpoints; ambiguous states require manual intervention. Power-loss durability remains unproven. |
 | DB-002 PostgreSQL source clone consumed | Working clone preserves the catalogued snapshot; repeated restore tested. |
 | DB-003 Cross-database catalog rebind | Catalog fingerprint checked before operations and rebinding; regression tested. |
-| DB-004 Prune removes before metadata | Metadata is committed before artifact deletion; crash/power-loss and pending-GC retry remain to be tested. |
+| DB-004 Prune removes before metadata | Retired records now persist in optional metadata.pending_gc before deletion. Prune retries recorded artifacts, retaining victim manifests on chunk deletion failure. Interrupted-commit retry regression added. Untracked files are not automatically deleted. Power-loss and filesystem races remain unproven. |
 | DB-005 PostgreSQL fence failure | Error cleanup and a recovery journal are implemented; process-exit tests cover a fence interruption. Network loss and power failure remain untested. |
 | DB-006 MCP private-network targets | MCP allows SQLite and loopback only; loopback is not proof a target is safe. |
 | DB-007 MCP destructive operations | Restore/prune require session enablement and per-call MCP elicitation; unsupported clients fail closed. Tested allow/deny over stdio. This depends on the host faithfully showing the confirmation. |
@@ -21,7 +21,7 @@ disposable databases; dbsnap is not a production backup system.
 | DB-013 SQLite creates missing database | Open-existing behavior implemented and tested. |
 | DB-014 Durability | Metadata files, new MySQL safety artifacts and recovery journals are synced; Unix directory sync is used. Cross-platform power-loss durability remains unproven. |
 | DB-015 Temporary data privacy | New Unix `.dbsnap` directories are private; existing directory permissions, Windows ACLs, and crash cleanup remain unresolved. Snapshot data may contain sensitive information. |
-| DB-016 Existing CAS chunk corruption | Existing chunks are verified before reuse; regression tested. A full verify command is not implemented. |
+| DB-016 Existing CAS chunk corruption | Existing chunks verified before reuse. CLI/MCP verify checks active snapshot chunks and combined sizes, compressed hash/size, or archive hash/size. PostgreSQL clones receive existence-only checks. Verification is not a restore test. Corruption regression added. |
 | DB-017 SQLite WAL size | WAL path now appends `-wal`; more extension-specific tests are desirable. |
 | DB-018 CI/E2E and fault injection | Live CLI/MCP, PostgreSQL fault tests, expanded MySQL/MariaDB I/O/process-exit tests, real dump ENOSPC and bounded InnoDB storage-full replay/recovery tests are available. CI includes the new CLI/MCP and two-engine bounded-storage jobs. See TESTING.md and QA-REPORT.md. These changes still need a new hosted CI run; arbitrary network/server/power-loss failures are not fully covered. |
 | DB-019 Release gate | Release gates on CI and native/packed-package smoke tests. Local release binary and native Windows packed npm smoke are checked. New workflow jobs and cross-platform release artifacts require hosted execution; no new version was published by this QA pass. |
@@ -32,6 +32,19 @@ disposable databases; dbsnap is not a production backup system.
 Do not tag a release as fully audited or production-ready while the unresolved
 items above remain. In particular, staging MySQL dumps safely requires handling
 database-qualified SQL without redirecting it to the wrong target.
+
+## Priority follow-up — 2026-11-04
+
+Published npm v0.3.14 installation and the successful hosted publish step are
+now confirmed. New source additions include verify, doctor, recover, exec,
+retained live comparison, bounded SQLite row preview, SQLite/PostgreSQL clone
+sandboxes, explicitly requested isolated MySQL/MariaDB Docker sandboxes,
+structured MCP output, and pending-GC retry metadata. They are not
+yet published. See [PRIORITY-IMPLEMENTATION.md](PRIORITY-IMPLEMENTATION.md) and
+[DEVELOPMENT-WORKFLOW.md](DEVELOPMENT-WORKFLOW.md) for coverage and explicit
+unsupported cases. Previous power-loss, isolation and concurrent-writer
+limitations remain open; a source feature is not evidence of hosted release
+validation until the new workflow is run.
 
 All MySQL/MariaDB dump fallback options now retain routines, triggers, and
 events. If the installed client cannot supply these options, snapshot creation
@@ -54,7 +67,9 @@ new connections after preflight, and untrusted SQL remain outside the guarantees
 
 Diff supports SQLite schema/counts, PostgreSQL clone table/view/counts, and
 standard MySQL/MariaDB table/counts with offline dump inspection. MySQL diff
-verifies compressed hashes and sizes and never executes SQL. PostgreSQL dump
-diff, per-row content comparison, and MySQL view/routine/trigger/event diff are
-not implemented. Unsupported snapshot types and dump INSERT formats fail with
-an explicit error rather than silently replaying into the live target.
+verifies compressed hashes and sizes and never executes SQL. Source additions
+after v0.3.14 support two PostgreSQL archives through offline pg_restore schema
+and column-list COPY row counts, and bounded SQLite primary-key row-change
+counts without values. Mixed clone/archive comparison, server row-content
+preview and MySQL view/routine/trigger/event diff remain unsupported. Unsupported
+formats fail explicitly rather than replaying into the live target.

@@ -21,6 +21,32 @@ fn run(command: Command) -> i32 {
     };
 
     let result = match command {
+        Command::DiffRows {
+            from,
+            to,
+            table,
+            limit,
+            db,
+        } => ops::diff_rows_at(&root, db.as_deref(), &from, &to, &table, limit),
+        Command::DiffLive { tag_or_id, db } => ops::diff_live_at(&root, db.as_deref(), &tag_or_id),
+        Command::Sandbox {
+            tag_or_id,
+            db,
+            output,
+            docker_image,
+        } => ops::sandbox_at(
+            &root,
+            db.as_deref(),
+            &tag_or_id,
+            output.as_deref(),
+            docker_image.as_deref(),
+        ),
+        Command::Verify { tag_or_id, db } => {
+            ops::verify_at(&root, db.as_deref(), tag_or_id.as_deref())
+        }
+        Command::Doctor { db } => ops::doctor_at(&root, db.as_deref()),
+        Command::Recover { db } => ops::recover_at(&root, db.as_deref()),
+        Command::Exec { db, command } => ops::exec_at(&root, db.as_deref(), &command),
         Command::Init { db, allow_remote } => ops::init_at(&root, db.as_deref(), allow_remote),
         Command::Save {
             tag,

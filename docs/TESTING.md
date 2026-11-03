@@ -52,14 +52,16 @@ container ID/name. The test verifies the image and published port, restarts the
 same datadir with a larger bounded tablespace, then still requires successful
 dbsnap recovery and the original data. `--exercise-server-restart` tests this
 path even if the server stayed alive. This fixture repair is test orchestration;
-dbsnap itself does not manage Docker or repair crashed database servers.
+Normal restore does not restart Docker or repair crashed database servers.
+The separate explicit `sandbox --docker-image` command creates an independent
+container; it never restarts the source database server.
 
 The script exercises help/version, init, save, list/status (text and JSON), diff,
 pin/unpin, prune --keep/--all, restore, rollback, and MCP session startup. It calls
-all six MCP tools, verifies destructive-session denial, explicit declined and
+all ten current MCP tools, verifies destructive-session denial, explicit declined and
 accepted confirmations, checks data after restore, and verifies that missing
 snapshots fail. PostgreSQL additionally exercises portable dump save/restore
-and the explicit refusal of dump diff. Binary/launcher platform selection is
+and archive-to-archive offline diff (mixed clone/archive is explicitly refused). Binary/launcher platform selection is
 tested separately by `npm/test/launcher.test.js`.
 
 CI runs the SQLite CLI/MCP script on Linux/macOS/Windows and the PostgreSQL,
@@ -115,3 +117,33 @@ configuration; absent optional server URLs cause those tests to return early.
 See [AUDIT-STATUS.md](AUDIT-STATUS.md) for findings that remain open and
 [MYSQL-RESTORE.md](MYSQL-RESTORE.md) for recovery instructions.
 Recorded local results are in [QA-REPORT.md](QA-REPORT.md).
+
+## Source additions after v0.3.14
+
+The CLI/MCP process script now exercises verify, doctor, exec success/failure,
+retained live comparison, SQLite primary-key row counts, independent SQLite and
+PostgreSQL clone sandboxes, and MySQL journal recover. It validates structured
+MCP results and exact save IDs as well as human text. PostgreSQL's generated
+sandbox is explicitly dropped by the test; user snapshots are not sandbox targets.
+
+Additional Rust regressions verify corrupt-artifact refusal without modifying
+the live database, sandbox overwrite refusal and independence, row update/add/
+delete counts without values, preview limits, and interruption between prune
+metadata commit and artifact cleanup. The next prune must empty the recorded GC
+queue and retain an unrecorded sentinel file. `pending_gc` reserves retired IDs.
+These additions require a newly built binary; published v0.3.14 is only used for
+the separate installation smoke check. See DEVELOPMENT-WORKFLOW.md for limits.
+
+PostgreSQL archive regressions extract schema and column-list COPY data offline,
+compare identical/changed archives, reject corrupt input, preserve live row
+counts and remove staging files on failure. A Windows-specific GC regression
+holds an open chunk handle without delete sharing, checks that prune retains
+the manifest and pending queue, then releases the handle and retries cleanup.
+
+MySQL/MariaDB process jobs also use `--docker-sandbox`: import into a separate
+container, assert network `none` and no published ports, modify its rows, check
+that source rows are unchanged, and explicitly remove that exact container.
+`DBSNAP_TEST_DOCKER_SANDBOX_IMAGE=mysql:8.0` (or `mariadb:11`) enables the
+failed-replay cleanup regression. Run it separately from other sandbox tests:
+it compares the labelled container inventory before and after the operation.
+The command creates Docker resources only when the image option is explicit.

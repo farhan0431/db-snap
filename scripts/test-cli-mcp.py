@@ -14,6 +14,7 @@ import queue
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -72,6 +73,11 @@ class Mcp:
         reply = self.call("tools/call", {"name": name, "arguments": arguments or {}}, approve)
         assert "error" not in reply, reply
         assert bool(reply["result"].get("isError")) == error, reply
+        structured=reply["result"].get("structuredContent")
+        assert isinstance(structured, dict) and structured["ok"] == (not error), reply
+        assert isinstance(structured["message"], str), reply
+        if name == "dbsnap_create_snapshot" and not error:
+            assert structured["data"]["snapshot_id"], reply
         return "\n".join(item.get("text", "") for item in reply["result"].get("content", []))
 
     def close(self):
@@ -91,6 +97,7 @@ def main():
     parser.add_argument("--binary", required=True)
     parser.add_argument("--disk-full", action="store_true",
                         help="test a real dump-client ENOSPC using /dev/full (Unix MySQL/MariaDB)")
+    parser.add_argument("--docker-sandbox", action="store_true", help="test explicit MySQL/MariaDB sandbox on a separate network-isolated Docker server")
     options = parser.parse_args()
     binary = Path(options.binary).resolve()
     created = False
@@ -130,7 +137,8 @@ def main():
             created = True
 
         def cli(*args, error=False):
-            result = subprocess.run([str(binary), *args, "--db", url], cwd=root,
+            invocation = [str(binary), "exec", "--db", url, *args[1:]] if args and args[0] == "exec" else [str(binary), *args, "--db", url]
+            result = subprocess.run(invocation, cwd=root,
                                     capture_output=True, text=True, timeout=120)
             assert (result.returncode != 0) == error, result.stderr
             return result.stdout if not error else result.stderr
@@ -141,13 +149,49 @@ def main():
         try:
             checked([str(binary), "--version"])
             checked([str(binary), "--help"])
-            for command in ("init", "save", "restore", "rollback", "list", "status", "diff", "pin", "unpin", "prune", "mcp"):
+            for command in ("init", "save", "restore", "rollback", "list", "status", "diff", "diff-live", "diff-rows", "pin", "unpin", "prune", "mcp", "verify", "doctor", "recover", "exec", "sandbox"):
                 checked([str(binary), command, "--help"])
             sql("CREATE TABLE items(id INT PRIMARY KEY, value TEXT); INSERT INTO items VALUES(1,'first');")
             cli("init")
             cli("save", "before")
             sql("INSERT INTO items VALUES(2,'second'); CREATE TABLE extra(id INT);")
             cli("save", "after")
+            assert json.loads(cli("verify"))["ok"]
+            assert json.loads(cli("doctor"))["mutations_performed"] is False
+            command_result = json.loads(cli("exec", "--", sys.executable, "-c", "print('checkpoint child')"))
+            assert command_result["success"] and command_result["snapshot_id"]
+            cli("exec", "--", sys.executable, "-c", "raise SystemExit(7)", error=True)
+            if options.engine == "sqlite":
+                fork = root / "experiment.db"
+                fork_result = json.loads(cli("sandbox", "before", "--output", str(fork)))
+                assert fork_result["source_modified"] is False
+                with closing(sqlite3.connect(fork)) as connection:
+                    assert connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
+                    connection.execute("DELETE FROM items")
+                    connection.commit()
+                assert rows() == 2
+            elif options.engine == "postgres":
+                fork = json.loads(cli("sandbox", "before"))["database"]
+                assert fork.startswith("__dbsnap_sandbox_") and fork.replace('_','').isalnum()
+                sql(f'DROP DATABASE "{fork}"', admin=True)
+            else:
+                cli("sandbox", "before", error=True)
+                if options.docker_sandbox:
+                    image = "mariadb:11" if parsed.scheme == "mariadb" else "mysql:8.0"
+                    client = "mariadb" if parsed.scheme == "mariadb" else "mysql"
+                    sandbox=json.loads(cli("sandbox","before","--docker-image",image))
+                    container=sandbox["container_id"]
+                    assert len(container)==64 and all(c in '0123456789abcdef' for c in container)
+                    try:
+                        inspected=json.loads(checked(["docker","inspect",container]))[0]
+                        assert inspected["HostConfig"]["NetworkMode"]=="none"
+                        assert not inspected["HostConfig"]["PortBindings"]
+                        count=checked(["docker","exec",container,client,"--no-defaults","-uroot","-N","-e",f"SELECT COUNT(*) FROM `{name}`.items"])
+                        assert count.strip()=="1", count
+                        checked(["docker","exec",container,client,"--no-defaults","-uroot","-e",f"DELETE FROM `{name}`.items"])
+                        assert rows()==2, "sandbox writes must not change source"
+                    finally:
+                        checked(["docker","rm","-f","-v",container])
             if options.disk_full:
                 assert options.engine == "mysql"
                 fault_env = os.environ.copy()
@@ -198,11 +242,13 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
             assert "rows: 1 -> 2" in cli("diff", "before", "after")
             catalog = json.loads(cli("list", "--json"))
             assert catalog
-            assert json.loads(cli("status", "--json"))["snapshot_count"] == 2
+            assert json.loads(cli("status", "--json"))["snapshot_count"] >= 2
             assert "before" in cli("list")
             assert "snapshots" in cli("status")
             if options.engine == "postgres":
                 cli("save", "portable", "--method", "dump")
+                cli("save", "portable-second", "--method", "dump")
+                assert "no archive schema or table row-count differences" in cli("diff","portable","portable-second")
                 cli("diff", "before", "portable", error=True)
                 cli("restore", "portable")
                 assert rows() == 2
@@ -214,11 +260,31 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
             assert rows() == 1
             cli("rollback")
             assert rows() == 2
+            if options.engine == "mysql":
+                failure_env = os.environ.copy()
+                failure_env["DBSNAP_FAILPOINT"] = "mysql_exit_after_journal"
+                failure = subprocess.run([str(binary), "restore", "before", "--db", url], cwd=root,
+                                         env=failure_env, capture_output=True, text=True, timeout=120)
+                assert failure.returncode != 0
+                assert json.loads(cli("doctor"))["pending_recovery"]
+                cli("recover")
+                assert rows() == 2
 
             session = Mcp(binary, root, url, False)
             try:
                 tools = session.call("tools/list", {})["result"]["tools"]
-                assert len(tools) == 6
+                assert len(tools) == 10
+                verified = json.loads(cli("verify"))
+                assert verified["ok"]
+                assert json.loads(cli("doctor"))["mutations_performed"] is False
+                session.tool("dbsnap_verify")
+                session.tool("dbsnap_doctor")
+                live = json.loads(session.tool("dbsnap_diff_live", {"from":"before"}))
+                assert live["live_snapshot_retained"]
+                if options.engine == "sqlite":
+                    preview = json.loads(session.tool("dbsnap_diff_rows", {"from":"before","to":live["live_snapshot_id"],"table":"items"}))
+                    assert preview["added"] == 1 and not preview["row_values_disclosed"]
+                    assert json.loads(cli("diff-rows","before",live["live_snapshot_id"],"--table","items"))["added"] == 1
                 session.tool("dbsnap_status")
                 session.tool("dbsnap_list_snapshots")
                 session.tool("dbsnap_create_snapshot", {"tag": "mcp-before"})
@@ -251,7 +317,7 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
             assert json.loads(cli("status", "--json"))["snapshot_count"] == 0
             cli("restore", error=True)
             assert rows() == 2
-            print(f"PASS {options.engine}: all CLI commands, six MCP tools, approval/denial, JSON, diff, prune and data assertions")
+            print(f"PASS {options.engine}: CLI/MCP including verify/doctor, approval/denial, JSON, diff, prune and data assertions")
         finally:
             if created:
                 sql(f"DROP DATABASE {quoted}", admin=True)

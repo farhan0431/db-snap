@@ -15,6 +15,58 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Bounded SQLite row-change counts by primary key, without printing row values
+    DiffRows {
+        from: String,
+        to: String,
+        #[arg(long)]
+        table: String,
+        #[arg(long, default_value_t = 10000)]
+        limit: usize,
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Capture and retain a live checkpoint, then compare it with a snapshot
+    DiffLive {
+        tag_or_id: String,
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Fork SQLite/PostgreSQL data, or explicitly create an isolated MySQL Docker server
+    Sandbox {
+        tag_or_id: String,
+        #[arg(long)]
+        db: Option<String>,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        /// Explicit isolated Docker server for MySQL/MariaDB; never publishes ports
+        #[arg(long, value_parser=["mysql:8.0","mariadb:11"])]
+        docker_image: Option<String>,
+    },
+    /// Check snapshot artifact integrity without replaying or restoring SQL
+    Verify {
+        /// Omit to check all snapshots
+        tag_or_id: Option<String>,
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Diagnose connections, pending recovery and untracked staging files
+    Doctor {
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Resume the recovery recorded in the database restore journal
+    Recover {
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Save a checkpoint then run a command; never automatically restore on failure
+    Exec {
+        #[arg(long)]
+        db: Option<String>,
+        #[arg(required = true, last = true)]
+        command: Vec<String>,
+    },
     /// Bind this project to a database (auto-detects .env / common paths)
     Init {
         /// Database path or URL (overrides DATABASE_URL), e.g. --db ./prisma/dev.db

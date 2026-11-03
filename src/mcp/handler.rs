@@ -22,7 +22,7 @@ pub fn handle_with_policy(ctx: &Ctx, msg: &Value, allow_destructive: bool) -> Op
             "protocolVersion": negotiated_version(msg),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "dbsnap", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "dbsnap is a physical time-machine for the local development database. Create a snapshot with dbsnap_create_snapshot BEFORE risky migrations or DDL, and restore with dbsnap_restore_snapshot when something breaks. Run dbsnap_status first if unsure which database is protected."
+            "instructions": "dbsnap provides checkpoints for local development databases. Check dbsnap_status, save before risky changes, and retain the exact snapshot_id from structuredContent.data. Verify checks artifact integrity/existence, not restore success. Doctor diagnoses journals and untracked files without applying recovery. Live diff creates a retained checkpoint; row preview is SQLite-only. Restore/prune require authorized destructive sessions and per-call elicitation. Stop MySQL writers/events first, and preserve recovery journals and pinned snapshots on failure."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": schema::tools() })),
@@ -69,7 +69,7 @@ fn tools_call(
                     None => return Ok(error_result("tag must be a string")),
                 },
             };
-            ops::save_with(ctx, tag, crate::engine::SaveMethod::Clone)
+            ops::save_json_with(ctx, tag, crate::engine::SaveMethod::Clone)
         }
         "dbsnap_restore_snapshot" => {
             let id = args["tag_or_id"].as_str().map(str::to_string);
@@ -93,9 +93,43 @@ fn tools_call(
             ops::prune_with(ctx, keep)
         }
         "dbsnap_status" => ops::status_with(ctx),
+        "dbsnap_verify" => {
+            let selector = match args.get("tag_or_id") {
+                None => None,
+                Some(value) => match value.as_str() {
+                    Some(s) => Some(s),
+                    None => return Ok(error_result("tag_or_id must be a string")),
+                },
+            };
+            ops::verify_with(ctx, selector)
+        }
+        "dbsnap_doctor" => ops::doctor_with(ctx),
+        "dbsnap_diff_rows" => {
+            let (Some(from), Some(to), Some(table)) = (
+                args["from"].as_str(),
+                args["to"].as_str(),
+                args["table"].as_str(),
+            ) else {
+                return Ok(error_result("from, to and table must be strings"));
+            };
+            let limit = match args.get("limit") {
+                None => 10000,
+                Some(value) => match value.as_u64().and_then(|v| usize::try_from(v).ok()) {
+                    Some(v) => v,
+                    None => return Ok(error_result("limit must be an integer")),
+                },
+            };
+            ops::diff_rows_with(ctx, from, to, table, limit)
+        }
+        "dbsnap_diff_live" => {
+            let Some(from) = args["from"].as_str() else {
+                return Ok(error_result("from must be a snapshot ID or tag"));
+            };
+            ops::diff_live_with(ctx, from)
+        }
         other => {
             return Ok(error_result(&format!(
-                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_diff, dbsnap_prune, dbsnap_status"
+                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_diff, dbsnap_prune, dbsnap_status, dbsnap_verify, dbsnap_doctor, dbsnap_diff_live, dbsnap_diff_rows"
             )));
         }
     };
@@ -103,15 +137,43 @@ fn tools_call(
     Ok(match tool_result {
         Ok(text) => json!({
             "content": [ { "type": "text", "text": crate::util::mask(&text) } ],
-            "isError": false
+            "isError": false,
+            "structuredContent": {"ok":true,"operation":name,"message":crate::util::mask(&text),"data":serde_json::from_str::<Value>(&crate::util::mask(&text)).ok()}
         }),
         Err(e) => json!({
             "content": [ { "type": "text", "text": crate::util::mask(&format!("Error: {e:#}")) } ],
-            "isError": true
+            "isError": true,
+            "structuredContent": {"ok":false,"operation":name,"code":"OPERATION_FAILED","message":crate::util::mask(&format!("{e:#}")),
+                "data": recovery_hint(ctx)}
         }),
     })
 }
 
+fn recovery_hint(ctx: &Ctx) -> Value {
+    let path = ctx.store.root.join("mysql-restore.json");
+    if !path.exists() {
+        return Value::Null;
+    }
+    let id = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok());
+    match id {
+        Some(id)
+            if !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') =>
+        {
+            json!({"stage":"recovery_required","recovery_id":id,"next_action":"resolve the failure cause, stop writers/events, then restore recovery_id through the approved restore tool or CLI recover"})
+        }
+        _ => {
+            json!({"stage":"manual_inspection","next_action":"preserve malformed MySQL recovery journal and inspect it"})
+        }
+    }
+}
+
 fn error_result(text: &str) -> Value {
-    json!({ "content": [ { "type": "text", "text": crate::util::mask(text) } ], "isError": true })
+    json!({ "content": [ { "type": "text", "text": crate::util::mask(text) } ], "isError": true,
+        "structuredContent":{"ok":false,"code":"INVALID_OR_DENIED","message":crate::util::mask(text)} })
 }

@@ -107,15 +107,60 @@ impl PostgresEngine {
         Self { pg }
     }
 
+    pub fn verify_clone_exists(&self, name: &str) -> Result<()> {
+        let mut admin = self.maintenance()?;
+        if !Self::db_exists(&mut admin, name)? {
+            bail!("PostgreSQL snapshot clone is missing");
+        }
+        Ok(())
+    }
+
+    pub fn managed_exists(&self, name: &str) -> Result<bool> {
+        if !name.starts_with(SNAP_PREFIX) {
+            bail!("not a managed database");
+        }
+        Self::db_exists(&mut self.maintenance()?, name)
+    }
+
+    pub fn create_sandbox(&self, record: &SnapshotRecord, ids: &HashSet<String>) -> Result<String> {
+        let Location::PgDatabase { name: source } = &record.location else {
+            bail!("PostgreSQL sandbox requires a clone snapshot; dump sandbox is unsupported");
+        };
+        if ![
+            format!("{SNAP_PREFIX}{}", record.id),
+            format!("{SNAP_PREFIX}auto_{}", record.id),
+        ]
+        .contains(source)
+            || record.engine != "postgres"
+        {
+            bail!("invalid source clone");
+        }
+        let name = format!("{SNAP_PREFIX}sandbox_{}", util::new_id(ids));
+        self.maintenance()?.batch_execute(&format!(
+            "CREATE DATABASE {} TEMPLATE {}",
+            Self::quote_ident(&name),
+            Self::quote_ident(source)
+        ))?;
+        Ok(name)
+    }
+
     /// Compare catalogued server-side clones using read-only transactions.
     /// Dump archives must not be replayed into a live server for inspection.
-    pub fn diff(&self, left: &SnapshotRecord, right: &SnapshotRecord) -> Result<String> {
+    pub fn diff(
+        &self,
+        store: &Storage,
+        left: &SnapshotRecord,
+        right: &SnapshotRecord,
+    ) -> Result<String> {
+        if left.method == "pg-dump" && right.method == "pg-dump" {
+            return super::postgres_archive_diff::compare(store, left, right);
+        }
         use std::collections::BTreeMap;
         type Objects = BTreeMap<(String, String), (String, Option<i64>)>;
         fn inspect(engine: &PostgresEngine, record: &SnapshotRecord) -> Result<Objects> {
             let name = match &record.location {
                 Location::PgDatabase { name } if name == &format!("{SNAP_PREFIX}{}", record.id) && record.method == "pg-clone" => name,
-                _ => bail!("PostgreSQL diff currently supports server-side clone snapshots only; dump archives are not supported"),
+                _ => bail!("PostgreSQL diff requires two clone snapshots or two pg-dump archives; mixed snapshot types are unsupported"),
             };
             let mut client = engine.connect(name)?;
             let mut tx = client.build_transaction().read_only(true).start()?;

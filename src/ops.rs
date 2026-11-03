@@ -7,6 +7,16 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+#[path = "health.rs"]
+mod health;
+#[path = "rows.rs"]
+mod rows;
+pub use health::{
+    diff_live_at, diff_live_with, doctor_at, doctor_with, exec_at, recover_at, recover_with,
+    sandbox_at, verify_at, verify_with,
+};
+pub use rows::{diff_rows_at, diff_rows_with};
+
 /// Agent-facing skill installed into the project on `dbsnap init` — teaches
 /// AI agents when and how to snapshot/restore.
 const AGENT_SKILL_MD: &str = include_str!(concat!(
@@ -189,6 +199,23 @@ pub fn save_at(
 }
 
 pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> Result<String> {
+    save_report_with(ctx, tag, method, false)
+}
+
+pub fn save_json_with(
+    ctx: &Ctx,
+    tag: Option<String>,
+    method: engine::SaveMethod,
+) -> Result<String> {
+    save_report_with(ctx, tag, method, true)
+}
+
+fn save_report_with(
+    ctx: &Ctx,
+    tag: Option<String>,
+    method: engine::SaveMethod,
+    json: bool,
+) -> Result<String> {
     let _lock = ctx.store.lock()?;
     ensure_active_binding(ctx)?;
     let tag = match tag {
@@ -213,6 +240,11 @@ pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> 
     ctx.store.write_metadata(&meta)?;
 
     let r = &outcome.record;
+    if json {
+        return Ok(serde_json::to_string(
+            &serde_json::json!({"operation":"save","snapshot_id":r.id,"tag":r.tag,"method":r.method,"linked":outcome.linked}),
+        )?);
+    }
     let detail = match r.method.as_str() {
         "pg-clone" => format!(
             "server-side clone, {} in database",
@@ -332,8 +364,9 @@ fn prune_auto_snapshots(
     meta.snapshots
         .retain(|s| !victims.iter().any(|v| v.id == s.id));
     validate_prune_survivors(store, meta, &victims)?;
+    meta.pending_gc.extend(victims.clone());
     store.write_metadata(meta)?;
-    remove_records(store, meta, &victims, pg)?;
+    retry_gc(store, meta, pg)?;
     Ok(())
 }
 
@@ -416,21 +449,31 @@ fn remove_records(
             }
             crate::storage::Location::Manifest { path } => {
                 if !survivor_manifests.contains(path.as_str()) {
+                    let mut chunks_removed = true;
                     // Free the manifest's unique chunks, then the manifest.
                     if let Ok(m) = store.read_manifest_file(path) {
                         for hex in m.hexes() {
                             if !survivor_chunks.contains(&hex) {
                                 let chunk = store.checked_chunk_path(&hex)?;
-                                if let Ok(md) = fs::metadata(&chunk) {
-                                    let size = md.len();
-                                    if fs::remove_file(&chunk).is_ok() {
-                                        freed += size;
+                                match fs::metadata(&chunk) {
+                                    Ok(md) => {
+                                        if fs::remove_file(&chunk).is_ok() {
+                                            freed += md.len();
+                                        } else {
+                                            chunks_removed = false;
+                                        }
                                     }
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(_) => chunks_removed = false,
                                 }
                             }
                         }
+                    } else if store.checked_artifact_path(path, "manifests")?.exists() {
+                        chunks_removed = false;
                     }
-                    fs::remove_file(store.checked_artifact_path(path, "manifests")?).ok();
+                    if chunks_removed {
+                        fs::remove_file(store.checked_artifact_path(path, "manifests")?).ok();
+                    }
                 }
             }
             crate::storage::Location::PgDatabase { name } => {
@@ -479,7 +522,7 @@ pub fn diff_with(ctx: &Ctx, from: &str, to: &str) -> Result<String> {
             engine::sqlite::SqliteEngine::new(path.clone()).diff(&ctx.store, &left, &right)
         }
         DbTarget::Postgres(pg) if left.engine == "postgres" && right.engine == "postgres" => {
-            engine::postgres::PostgresEngine::new(pg.clone()).diff(&left, &right)
+            engine::postgres::PostgresEngine::new(pg.clone()).diff(&ctx.store, &left, &right)
         }
         DbTarget::Mysql(target) if left.engine == "mysql" && right.engine == "mysql" => {
             engine::mysql::MysqlEngine::new(target.clone()).diff(&ctx.store, &left, &right)
@@ -602,25 +645,76 @@ pub fn prune_with(ctx: &Ctx, keep: usize) -> Result<String> {
             candidates.into_iter().partition(|s| s.pinned);
         meta.snapshots.extend(protected);
         validate_prune_survivors(&ctx.store, &meta, &victims)?;
+        meta.pending_gc.extend(victims.clone());
         ctx.store.write_metadata(&meta)?;
-        let (n, f) = remove_records(&ctx.store, &meta, &victims, pg_target(&ctx.db))?;
+        if std::env::var("DBSNAP_TEST_FAILPOINT").as_deref() == Ok("prune_after_metadata") {
+            bail!("injected interruption after prune metadata commit; retry prune to collect recorded artifacts");
+        }
+        let (n, f) = retry_gc(&ctx.store, &mut meta, pg_target(&ctx.db))?;
         removed = n;
         freed = f;
     }
+    if !meta.pending_gc.is_empty() {
+        let (n, f) = retry_gc(&ctx.store, &mut meta, pg_target(&ctx.db))?;
+        removed += n;
+        freed += f;
+    }
     ctx.store.write_metadata(&meta)?;
 
+    let pending_hint = if meta.pending_gc.is_empty() {
+        String::new()
+    } else {
+        format!("\n{} recorded artifacts remain pending GC; inspect doctor and retry prune after fixing the cause",meta.pending_gc.len())
+    };
     if removed == 0 {
         Ok(format!(
-            "nothing to prune — {} snapshots kept",
+            "nothing to prune — {} snapshots kept{pending_hint}",
             meta.snapshots.len()
         ))
     } else {
         Ok(format!(
-            "pruned {removed} snapshots, freed {} — {} snapshots kept",
+            "pruned {removed} snapshots, freed {} — {} snapshots kept{pending_hint}",
             util::format_size(freed),
             meta.snapshots.len()
         ))
     }
+}
+
+fn retry_gc(
+    store: &Storage,
+    meta: &mut Metadata,
+    pg: Option<&ServerTarget>,
+) -> Result<(usize, u64)> {
+    let victims = meta.pending_gc.clone();
+    validate_prune_survivors(store, meta, &victims)?;
+    let (_, freed) = remove_records(store, meta, &victims, pg)?;
+    let mut remaining = Vec::new();
+    for record in &victims {
+        let remains = match &record.location {
+            crate::storage::Location::File { path } => {
+                store.checked_artifact_path(path, "snapshots")?.exists()
+            }
+            crate::storage::Location::Manifest { path } => {
+                store.checked_artifact_path(path, "manifests")?.exists()
+            }
+            crate::storage::Location::PgDatabase { name } => match pg {
+                Some(target) => engine::postgres::PostgresEngine::new(target.clone())
+                    .managed_exists(name)
+                    .unwrap_or(true),
+                None => true,
+            },
+        };
+        // Shared survivor artifacts are already retained by design, not GC
+        // failures. Never delete them merely to empty the queue.
+        let shared = meta.snapshots.iter().any(|s| s.location == record.location);
+        if remains && !shared {
+            remaining.push(record.clone());
+        }
+    }
+    let removed = victims.len() - remaining.len();
+    meta.pending_gc = remaining;
+    store.write_metadata(meta)?;
+    Ok((removed, freed))
 }
 
 pub fn pin_at(root: &Path, explicit: Option<&str>, selector: &str, pinned: bool) -> Result<String> {

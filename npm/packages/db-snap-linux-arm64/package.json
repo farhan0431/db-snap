@@ -1,6 +1,6 @@
 {
   "name": "db-snap-linux-arm64",
-  "version": "0.3.14",
+  "version": "0.4.0",
   "description": "dbsnap binary for Linux arm64 (glibc)",
   "license": "MIT",
   "os": [

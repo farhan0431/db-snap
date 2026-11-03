@@ -99,7 +99,8 @@ pub fn run(explicit_db: Option<&str>, allow_destructive: bool) -> Result<()> {
                         handler::handle_with_policy(&ctx, &msg, true)
                     } else {
                         Some(json!({"jsonrpc":"2.0", "id":request_id, "result":{
-                            "content":[{"type":"text","text":"Operation not approved, invalid, or client does not support MCP elicitation; no changes made."}], "isError":true
+                            "content":[{"type":"text","text":"Operation not approved, invalid, or client does not support MCP elicitation; no changes made."}], "isError":true,
+                            "structuredContent":{"ok":false,"code":"APPROVAL_REQUIRED","message":"Operation not approved, invalid, or client does not support MCP elicitation; no changes made."}
                         }}))
                     }
                 } else {

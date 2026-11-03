@@ -122,6 +122,13 @@ dbsnap status --json            # machine-readable database status
 dbsnap diff before after        # compare supported snapshots
 dbsnap pin "golden seed"        # protect a snapshot from pruning
 dbsnap unpin "golden seed"      # remove prune protection
+dbsnap verify                  # check active snapshot artifact integrity
+dbsnap doctor                  # diagnose connection, recovery and untracked files
+dbsnap recover                 # recover using a server restore journal
+dbsnap exec -- npm run db:migrate # checkpoint before a command; no automatic rollback
+dbsnap diff-live before         # capture/retain live checkpoint and compare
+dbsnap diff-rows before after --table users # bounded SQLite row-change counts
+dbsnap sandbox before --output ./experiment.db # new independent SQLite file
 ```
 
 `diff` supports SQLite snapshots, PostgreSQL server-side clone snapshots, and
@@ -132,9 +139,22 @@ routines, and triggers are not compared. Individual row contents are not
 compared on any engine. MySQL/MariaDB diff reads verified dumps offline and
 compares table definitions (including inline keys) and row counts. It does not
 execute SQL or compare views, routines, triggers or events. Unsupported INSERT
-formats produce an error; this is not a general SQL dump parser. PostgreSQL dump
-snapshots are not yet supported by `diff`.
+formats produce an error; this is not a general SQL dump parser. Source additions
+after v0.3.14 also compare two PostgreSQL dump archives offline using pg_restore:
+archive-wide schema changes and table COPY row counts, excluding ownership,
+privileges, row contents and sequence values. Mixed clone/archive comparison is
+unsupported. No SQL is replayed into the target.
 When a safety snapshot is enabled, restore stops if it cannot be created.
+
+The new verify/doctor/recover/exec/live-diff/row-preview/sandbox commands are
+available in the current source tree after v0.3.14. See
+[development workflow](docs/DEVELOPMENT-WORKFLOW.md) for exact engine coverage,
+side effects, recovery instructions, limits and the resumable recorded-GC queue.
+Verify does not execute restore. Sandbox supports SQLite files and PostgreSQL
+clones. MySQL/MariaDB requires explicit `sandbox --docker-image mysql:8.0` or
+`mariadb:11` and creates a network-isolated Docker server with no published port.
+PostgreSQL dump sandbox is unsupported. `diff-rows` is SQLite-only and never
+displays row values.
 PostgreSQL dump save and restore require `pg_dump` and `pg_restore` respectively
 to have the same major version as the target server. A mismatch is rejected
 before the database is changed.
@@ -170,7 +190,7 @@ Add to your MCP config (`.cursor/mcp.json`, Claude Desktop, Windsurf, …):
 
 or without a global install: `"command": "npx", "args": ["-y", "@farhan0431/db-snap", "mcp"]`.
 
-The agent gets six tools:
+The current source server exposes ten tools:
 
 Restore and prune are disabled by default in MCP. An operator can enable them
 for a server session by adding `--allow-destructive` to the MCP command arguments.
@@ -185,6 +205,15 @@ elicitation. Clients without elicitation support cannot invoke these operations.
 | `dbsnap_diff` | Compare schema and row counts for SQLite, PostgreSQL clones, or MySQL/MariaDB dumps. |
 | `dbsnap_prune` | Remove older snapshots, retaining at least one, when requested by the user. |
 | `dbsnap_status` | Show which database is protected before touching anything. |
+| `dbsnap_verify` | Check artifact integrity or clone existence without replaying SQL. |
+| `dbsnap_doctor` | Diagnose connections, journals, pending GC and untracked files. |
+| `dbsnap_diff_live` | Save and retain a live checkpoint, then compare it with `from`. |
+| `dbsnap_diff_rows` | Bounded SQLite added/removed/updated counts by primary key; no values returned. |
+
+Tool results retain text and add `structuredContent` with `ok`, `message`,
+optional typed `data`, and broad error categories. Creation returns the exact
+snapshot ID in data. Output schemas and annotations help clients interpret the
+result; permission checks still run in code. See the development workflow guide.
 
 ### Agent skill (automatic)
 
@@ -291,7 +320,16 @@ machine:
 - [x] **v0.3.0** — MySQL/MariaDB (consistent dumps, flavor detection, charset preservation)
 - [ ] `dbsnap export/import` — portable snapshot archives across machines
 - [x] snapshot diffing for SQLite, PostgreSQL clones and MySQL/MariaDB table dumps
-- [ ] extend snapshot diffing to PostgreSQL dump archives
+- [x] source: PostgreSQL dump schema/count comparison through offline pg_restore
+- [x] source: artifact verification, diagnosis and journal recovery commands
+- [x] source: checkpointed command execution without automatic rollback
+- [x] source: retained live comparison and bounded SQLite primary-key row preview
+- [x] source: SQLite/PostgreSQL clone sandboxes and resumable recorded GC
+- [x] source: explicit network-isolated MySQL/MariaDB Docker sandboxes
+- [ ] server-engine primary-key row previews and PostgreSQL dump sandboxes
+
+Source additions after v0.3.14 are tracked in
+[priority implementation follow-up](docs/PRIORITY-IMPLEMENTATION.md).
 
 ## Repository layout
 

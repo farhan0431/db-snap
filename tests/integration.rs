@@ -9,6 +9,154 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn bounded_rows_detect_updates_without_disclosing_values() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 2);
+    init(&root, &db)?;
+    save(&root, &db, "before")?;
+    Connection::open(&db)?.execute_batch("UPDATE users SET name='private-new-value' WHERE id=1; DELETE FROM users WHERE id=2; INSERT INTO users(id,name) VALUES(3,'secret')")?;
+    save(&root, &db, "after")?;
+    let report = ops::diff_rows_at(&root, db.to_str(), "before", "after", "users", 10)?;
+    let parsed: serde_json::Value = serde_json::from_str(&report)?;
+    assert_eq!(parsed["added"], 1);
+    assert_eq!(parsed["removed"], 1);
+    assert_eq!(parsed["updated"], 1);
+    assert!(!report.contains("private-new-value"));
+    assert!(!report.contains("secret"));
+    assert!(ops::diff_rows_at(&root, db.to_str(), "before", "after", "users", 1).is_err());
+    assert!(ops::diff_rows_at(
+        &root,
+        db.to_str(),
+        "before",
+        "after",
+        "users\"; DROP TABLE users;--",
+        10
+    )
+    .is_err());
+    assert_eq!(count_rows(&db), 2);
+    Ok(())
+}
+
+#[test]
+fn verify_doctor_exec_and_mcp_report_real_state() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 2);
+    assert!(ops::doctor_at(&root, db.to_str()).is_err());
+    assert!(!root.join(".dbsnap").exists());
+    init(&root, &db)?;
+    save(&root, &db, "before")?;
+    let report: serde_json::Value =
+        serde_json::from_str(&ops::verify_at(&root, db.to_str(), None)?)?;
+    assert_eq!(report["snapshots"][0]["verification"], "chunk_integrity");
+    assert_eq!(report["snapshots"][0]["restore_tested"], false);
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let orphan = store.tmp_dir().join("untracked.sql");
+    fs::write(&orphan, "sensitive")?;
+    let report: serde_json::Value = serde_json::from_str(&ops::doctor_at(&root, db.to_str())?)?;
+    assert!(report["untracked_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "tmp/untracked.sql"));
+    assert!(orphan.exists());
+    let fork = root.join("sandbox.db");
+    ops::sandbox_at(&root, db.to_str(), "before", Some(&fork), None)?;
+    assert_eq!(count_rows(&fork), 2);
+    add_rows(&fork, 2, 4);
+    assert_eq!(count_rows(&db), 2);
+    assert!(ops::sandbox_at(&root, db.to_str(), "before", Some(&fork), None).is_err());
+    let output = ops::exec_at(
+        &root,
+        db.to_str(),
+        &[env!("CARGO_BIN_EXE_dbsnap").into(), "--version".into()],
+    )?;
+    let output: serde_json::Value = serde_json::from_str(&output)?;
+    assert_eq!(output["automatic_restore"], false);
+    assert!(store
+        .load_metadata()?
+        .find(output["snapshot_id"].as_str())
+        .is_ok());
+    assert!(ops::exec_at(
+        &root,
+        db.to_str(),
+        &[
+            env!("CARGO_BIN_EXE_dbsnap").into(),
+            "invalid-command".into()
+        ]
+    )
+    .is_err());
+    assert_eq!(count_rows(&db), 2);
+    let ctx = ops::context_at(&root, db.to_str(), false, false)?;
+    let reply = dbsnap::mcp::handler::handle(&ctx, &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dbsnap_verify","arguments":{}}})).unwrap();
+    assert_eq!(reply["result"]["structuredContent"]["ok"], true);
+    let meta = store.load_metadata()?;
+    let record = meta.find(Some("before"))?;
+    let manifest = store.read_manifest_file(record.artifact_rel().unwrap())?;
+    fs::write(store.checked_chunk_path(&manifest.hexes()[0])?, "corrupt")?;
+    let error = ops::verify_at(&root, db.to_str(), None).unwrap_err();
+    assert!(format!("{error:#}").contains("\"ok\": false"));
+    assert_eq!(count_rows(&db), 2);
+    Ok(())
+}
+
+#[test]
+fn prune_interruption_keeps_recorded_gc_queue_for_retry() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "before")?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let stray = store.snapshots_dir().join("unrecorded.bin");
+    fs::write(&stray, "untouched")?;
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .env("DATABASE_URL", &db)
+        .env("DBSNAP_TEST_FAILPOINT", "prune_after_metadata")
+        .args(["prune", "--all"])
+        .output()?;
+    assert!(!result.status.success());
+    let meta = store.load_metadata()?;
+    assert!(meta.snapshots.is_empty());
+    assert_eq!(meta.pending_gc.len(), 1);
+    assert!(store.snapshot_path(&meta.pending_gc[0])?.exists());
+    ops::prune_at(&root, db.to_str(), 0)?;
+    assert!(store.load_metadata()?.pending_gc.is_empty());
+    assert!(stray.exists());
+    assert_eq!(count_rows(&db), 1);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn prune_locked_chunk_keeps_manifest_and_retries_gc() -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "before")?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let snapshot = store.load_metadata()?.find(Some("before"))?;
+    let manifest = store.read_manifest_file(snapshot.artifact_rel().unwrap())?;
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(store.checked_chunk_path(&manifest.hexes()[0])?)?;
+    let result = ops::prune_at(&root, db.to_str(), 0)?;
+    assert!(result.contains("pending GC"), "{result}");
+    assert_eq!(store.load_metadata()?.pending_gc.len(), 1);
+    assert!(store.snapshot_path(&snapshot)?.exists());
+    drop(held);
+    ops::prune_at(&root, db.to_str(), 0)?;
+    assert!(store.load_metadata()?.pending_gc.is_empty());
+    assert!(!store.snapshot_path(&snapshot)?.exists());
+    Ok(())
+}
+
+#[test]
 fn mcp_refuses_network_targets_before_creating_project_files() {
     for url in [
         "postgres://user@10.0.0.1/app",
@@ -1004,7 +1152,7 @@ fn mcp_stdio_roundtrip() -> Result<()> {
         responses[1]
     );
     assert!(
-        responses[2].contains("saved snapshot") && responses[2].contains("via-mcp"),
+        responses[2].contains("snapshot_id") && responses[2].contains("via-mcp"),
         "create: {}",
         responses[2]
     );
@@ -1099,6 +1247,55 @@ fn postgres_clone_diff_is_read_only() -> Result<()> {
     assert!(output.contains("added table public.extra"), "{output}");
     assert!(output.contains("row contents"), "{output}");
     assert_eq!(pg_count(&url)?, 2);
+    Ok(())
+}
+
+#[test]
+fn postgres_archive_diff_never_replays_into_target() -> Result<()> {
+    let Some(url) = pg_setup_test_db("archive_diff")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "CREATE TABLE items(id INT PRIMARY KEY, v TEXT); INSERT INTO items VALUES(1,'before')",
+    )?;
+    init(&root, Path::new(&url))?;
+    let dump = |tag: &str| {
+        ops::save_at(
+            &root,
+            Some(&url),
+            Some(tag.into()),
+            false,
+            false,
+            SaveMethod::Dump,
+        )
+    };
+    dump("before")?;
+    pg_exec(
+        &url,
+        "INSERT INTO items VALUES(2,E'line\\nvalue'); ALTER TABLE items ADD COLUMN extra INT",
+    )?;
+    dump("after")?;
+    let result = ops::diff_at(&root, Some(&url), "before", "after")?;
+    assert!(
+        result.contains("changed PostgreSQL archive schema"),
+        "{result}"
+    );
+    assert!(
+        result.contains("table public.items rows: 1 -> 2"),
+        "{result}"
+    );
+    assert!(result.contains("SQL was not executed"));
+    assert_eq!(pg_count(&url)?, 2);
+    assert!(ops::diff_at(&root, Some(&url), "after", "after")?.contains("no archive schema"));
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let after = store.load_metadata()?.find(Some("after"))?;
+    fs::write(store.snapshot_path(&after)?, "corrupt")?;
+    assert!(ops::diff_at(&root, Some(&url), "before", "after").is_err());
+    assert_eq!(fs::read_dir(store.tmp_dir())?.count(), 0);
+    assert_eq!(pg_count(&url)?, 2);
+    pg_drop_test_db(&url);
     Ok(())
 }
 
@@ -1532,6 +1729,69 @@ fn my_count(url: &str) -> Result<i64> {
 }
 
 #[test]
+fn mysql_docker_sandbox_import_failure_cleans_only_created_container() -> Result<()> {
+    let Ok(image) = std::env::var("DBSNAP_TEST_DOCKER_SANDBOX_IMAGE") else {
+        return Ok(());
+    };
+    let Some(url) = my_setup_test_db("sandbox_failure")? else {
+        return Ok(());
+    };
+    let root = temp_root();
+    let db = url.rsplit('/').next().unwrap();
+    my_exec_url(
+        &url,
+        Some(db),
+        "CREATE TABLE items(id INT); INSERT INTO items VALUES(1)",
+    )?;
+    init(&root, Path::new(&url))?;
+    save(&root, Path::new(&url), "before")?;
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let raw = root.join("invalid.sql");
+    fs::write(&raw, format!("USE `{db}`;\nINVALID SANDBOX SQL;\n"))?;
+    let mut record = record_by_tag(&root, "before");
+    record.id = "badcafe".into();
+    record.tag = "invalid".into();
+    record.location = dbsnap::storage::Location::File {
+        path: "snapshots/badcafe.sql.zst".into(),
+    };
+    let (original, size, hash) =
+        dbsnap::storage::compress::compress_to(&raw, &store.snapshot_path(&record)?)?;
+    record.original_bytes = original;
+    record.size_bytes = size;
+    record.blake3 = hash;
+    let mut meta = store.load_metadata()?;
+    meta.snapshots.push(record);
+    store.write_metadata(&meta)?;
+    let containers = || -> Result<String> {
+        let output = std::process::Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                "label=dbsnap.sandbox=true",
+                "--format",
+                "{{.ID}}",
+            ])
+            .output()?;
+        assert!(output.status.success());
+        Ok(String::from_utf8(output.stdout)?)
+    };
+    let before = containers()?;
+    let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .env("DATABASE_URL", &url)
+        .args(["sandbox", "invalid", "--docker-image", &image])
+        .output()?;
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("isolated sandbox replay failed"));
+    assert_eq!(containers()?, before);
+    assert_eq!(my_count(&url)?, 1);
+    assert_eq!(fs::read_dir(store.tmp_dir())?.count(), 0);
+    my_drop_test_db(&url);
+    Ok(())
+}
+
+#[test]
 fn mysql_diff_reads_dumps_without_changing_live_database() -> Result<()> {
     let Some(url) = my_setup_test_db("diff")? else {
         return Ok(());
@@ -1830,6 +2090,14 @@ fn mysql_dump_roundtrip_and_failure_recovery() -> Result<()> {
         let store = dbsnap::storage::Storage::find(&root).unwrap();
         let recovery: String =
             serde_json::from_slice(&fs::read(store.root.join("mysql-restore.json"))?)?;
+        if phase == "mysql_after_cleanup" {
+            let ctx = ops::context_at(&root, Some(&url), false, false)?;
+            let response=dbsnap::mcp::handler::handle(&ctx,&serde_json::json!({"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"dbsnap_diff","arguments":{"from":"missing-id","to":"missing-id"}}})).unwrap();
+            assert_eq!(
+                response["result"]["structuredContent"]["data"]["recovery_id"],
+                recovery
+            );
+        }
         assert!(store.load_metadata()?.find(Some(&recovery))?.pinned);
         assert!(ops::pin_at(&root, Some(&url), &recovery, false).is_err());
         assert!(ops::status_at(&root, Some(&url))?.contains("recovery is pending"));

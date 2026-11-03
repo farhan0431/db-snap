@@ -1,6 +1,6 @@
 {
   "name": "db-snap-linux-x64-musl",
-  "version": "0.3.14",
+  "version": "0.4.0",
   "description": "dbsnap binary for Linux x64 (musl/Alpine)",
   "license": "MIT",
   "os": [

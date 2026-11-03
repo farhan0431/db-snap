@@ -1,6 +1,6 @@
 {
   "name": "@farhan0431/db-snap",
-  "version": "0.3.14",
+  "version": "0.4.0",
   "description": "Development database snapshots and MCP server for SQLite, PostgreSQL, and MySQL/MariaDB.",
   "license": "MIT",
   "bin": {

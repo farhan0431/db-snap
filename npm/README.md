@@ -19,6 +19,10 @@ snapshot before another restore; see the recovery steps below.
 
 Requires Node.js 16 or later.
 
+The verify/doctor/recover/exec/live-diff/row-preview/sandbox additions described
+below are in the current repository after v0.3.14; a new published binary is
+required to use them. Check `dbsnap --help` for the commands in your installation.
+
 ```bash
 npm install -g @farhan0431/db-snap
 dbsnap --version
@@ -73,7 +77,7 @@ the following to your project's `.cursor/mcp.json`:
 Restart your client and ask it to run `dbsnap_status` to confirm the database
 before making changes. The server also exposes tools to create, list, restore,
 and prune snapshots. It resolves the project from its working directory, so
-start it in the project you want to protect. The six tools are:
+start it in the project you want to protect. The current source exposes ten tools:
 
 | MCP tool | Purpose |
 | --- | --- |
@@ -83,6 +87,14 @@ start it in the project you want to protect. The six tools are:
 | `dbsnap_diff` | Compare supported snapshots using `from` and `to`. |
 | `dbsnap_restore_snapshot` | Restore a selected `tag_or_id`, or the newest snapshot. |
 | `dbsnap_prune` | Prune with a positive integer `keep`; pinned snapshots survive. |
+| `dbsnap_verify` | Check snapshot hashes/sizes/chunks, or clone existence; no SQL replay. |
+| `dbsnap_doctor` | Report connectivity, journals, pending GC and untracked files. |
+| `dbsnap_diff_live` | Save and retain a live checkpoint, then compare it with `from`. |
+| `dbsnap_diff_rows` | Bounded SQLite primary-key row-change counts using `from`, `to`, and `table`. |
+
+Results include text plus structured `ok`, `message`, optional typed `data` and
+broad error codes. Snapshot creation returns the exact ID in data. Annotations
+describe behavior but do not replace session permissions or elicitation.
 
 Restore and prune are disabled by default in MCP. To enable them for a server
 session, start it with `dbsnap mcp --allow-destructive`. Each operation requires
@@ -116,6 +128,15 @@ file; review it against the repository's current skill when upgrading.
 | `dbsnap unpin <tag-or-id>` | Remove protection after reviewing the snapshot. |
 | `dbsnap prune --all` | Delete all unpinned snapshots. |
 | `dbsnap save tag --method dump` | Create a portable PostgreSQL dump snapshot. |
+| `dbsnap verify [id-or-tag]` | Check one or all active snapshots; integrity/existence is not a restore test. |
+| `dbsnap doctor` | Diagnose connection/recovery and report untracked files without deleting them. |
+| `dbsnap recover` | Resume the recovery journal; ambiguous PostgreSQL states require inspection. |
+| `dbsnap exec -- npm run db:migrate` | Checkpoint before a child command; retain it on failure, with no automatic rollback. |
+| `dbsnap diff-live before` | Capture and retain the current state, then compare. |
+| `dbsnap diff-rows before after --table users` | SQLite-only row-change counts by primary key, default limit 10,000 rows. |
+| `dbsnap sandbox before --output experiment.db` | Fork SQLite into a new file; existing files are never overwritten. |
+| `dbsnap sandbox before` | Create an independent PostgreSQL clone, recorded in `sandboxes.json`. |
+| `dbsnap sandbox before --docker-image mysql:8.0` | Explicit isolated MySQL server; use `mariadb:11` for MariaDB. Docker required. |
 
 `dbsnap list --json` and `dbsnap status --json` provide machine-readable output.
 Pinned snapshots survive `prune`, including `--all`.
@@ -142,7 +163,47 @@ and row counts. It does not replay SQL into the target.
 Equal row counts do not mean equal data. Individual row contents are not
 compared. PostgreSQL diff excludes indexes, constraints, routines and triggers;
 MySQL/MariaDB diff excludes views, routines, triggers and events. Unsupported
-INSERT formats produce an error. PostgreSQL dump archives are not supported.
+INSERT formats produce an error. Source additions after v0.3.14 compare two
+PostgreSQL dump archives offline through `pg_restore`: archive-wide schema
+changes and table counts from column-list COPY data, excluding ownership,
+privileges, row contents and sequence values. Mixed clone/archive diff is
+unsupported. The published v0.3.14 binary does not include archive diff.
+
+`diff-rows` additionally supports SQLite added/removed/updated counts without
+printing values. It requires explicit non-NULL primary keys and matching column
+layouts, refusing previews above `--limit` (maximum 100,000). Server-engine row
+diff is not implemented. `diff-live` uses storage and may briefly fence
+PostgreSQL connections because it creates a regular retained snapshot.
+
+## Checkpoints, diagnosis and sandbox experiments
+
+`verify` and `doctor` print JSON. Verification failure exits nonzero. Doctor
+reports a failed probe in its report and does not automatically repair anything.
+`recover` reads the existing MySQL journal's ID or applies unambiguous PostgreSQL
+journal recovery. It does not repair a stopped database server or choose an
+arbitrary restore point. SQLite has no server recovery journal.
+
+`exec` directly spawns a program without a shell, saving a checkpoint first.
+Snapshot failure prevents execution. Child failure retains the checkpoint and
+returns its ID, exit code and recovery command; the parent exits nonzero. Output
+is returned up to 64 KiB per stream. `--db` selects the checkpoint database, not
+the database your external program will use; set its environment deliberately.
+Arbitrary command execution is CLI-only, not an MCP tool.
+
+SQLite and PostgreSQL clone sandboxes let experiments target independent data.
+Connect your migration/application explicitly to the returned file/database.
+Cleanup is manual after closing sandbox connections. MySQL/MariaDB sandboxes
+require explicit `--docker-image mysql:8.0` or `mariadb:11`: a separate Docker
+server imports the verified dump with its original schema name, network disabled,
+no published ports/host mounts/source credentials. Use `docker exec` for SQL
+experiments and remove the returned container explicitly afterwards. Failed
+imports remove only the newly created container. PostgreSQL dump sandbox and
+same-server MySQL SQL rewriting are unsupported. See the workflow guide below.
+
+Prune persists retired records in `metadata.json.pending_gc` and retries their
+recorded artifact cleanup on a later prune. Shared survivor data and arbitrary
+untracked files are preserved. Doctor reports pending GC and untracked staging.
+Do not downgrade to an older binary unaware of `pending_gc` while it is nonempty.
 
 ## Recovering an interrupted MySQL/MariaDB restore
 
@@ -217,6 +278,7 @@ data you cannot afford to lose.
 - [MCP installation guide](https://github.com/farhan0431/db-snap/blob/main/INSTALL.md)
 - [Testing and audit coverage](https://github.com/farhan0431/db-snap/blob/main/docs/TESTING.md)
 - [MySQL recovery](https://github.com/farhan0431/db-snap/blob/main/docs/MYSQL-RESTORE.md)
+- [Development workflow and feature coverage](https://github.com/farhan0431/db-snap/blob/main/docs/DEVELOPMENT-WORKFLOW.md)
 - [Report an issue](https://github.com/farhan0431/db-snap/issues)
 
 MIT license.

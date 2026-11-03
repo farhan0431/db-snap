@@ -51,6 +51,10 @@ impl MysqlEngine {
         Self { target }
     }
 
+    pub fn sandbox(store: &Storage, record: &SnapshotRecord, image: &str) -> Result<String> {
+        super::mysql_sandbox::create(store, record, image)
+    }
+
     pub fn diff(
         &self,
         store: &Storage,

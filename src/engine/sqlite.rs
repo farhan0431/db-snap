@@ -144,7 +144,7 @@ impl SqliteEngine {
 
     /// Verify (§4-T3) and materialize the snapshot into a staging file
     /// without touching the live database.
-    fn stage(&self, store: &Storage, record: &SnapshotRecord) -> Result<PathBuf> {
+    pub(crate) fn stage(&self, store: &Storage, record: &SnapshotRecord) -> Result<PathBuf> {
         match &record.location {
             Location::File { path } => {
                 let src = store.checked_artifact_path(path, "snapshots")?;

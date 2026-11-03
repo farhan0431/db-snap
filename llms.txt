@@ -28,7 +28,7 @@
   Interrupted restores may require manual recovery; preserve the recovery journal.
 - `dbsnap diff before after` / `dbsnap_diff` — schema and row-count comparison
   for SQLite, PostgreSQL clones, and standard MySQL/MariaDB table dumps.
-  Row contents are not compared; PostgreSQL dump diff is unsupported.
+  Ordinary diff does not compare row contents; published v0.3.14 does not support dump diff.
 - `dbsnap_status`, `dbsnap_list_snapshots` — visibility before acting.
 - Safety: MCP permits SQLite/loopback only; CLI also permits private-network
   hosts by default. A local host is not proof of a safe database. Project
@@ -38,6 +38,19 @@
   clients without elicitation support fail closed.
 - Current limitations: [docs/AUDIT-STATUS.md](docs/AUDIT-STATUS.md).
 - Reproducible CLI, MCP and fault tests: [docs/TESTING.md](docs/TESTING.md).
+
+## Source additions after v0.3.14
+
+The current source adds CLI `verify`, `doctor`, `recover`, `exec`, `diff-live`,
+`diff-rows` (SQLite only), and `sandbox` (SQLite files/PostgreSQL clones;
+MySQL/MariaDB require explicit `--docker-image mysql:8.0` or `mariadb:11`).
+It adds MCP `dbsnap_verify`, `dbsnap_doctor`, `dbsnap_diff_live` and
+`dbsnap_diff_rows`, with structured results, output schemas and annotations.
+Check actual advertised tools/CLI help; published v0.3.14 does not include these
+new commands. Verify is not a restore test; exec does not automatically restore;
+diff-live retains its new checkpoint. Pending-GC records support prune retries
+without deleting arbitrary untracked files. Read
+[development workflow](docs/DEVELOPMENT-WORKFLOW.md) for limitations and cleanup.
 
 ## Contributing to this repository
 

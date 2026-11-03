@@ -103,9 +103,14 @@ jobs:
         env:
           DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/app_admin
       - name: MySQL CLI, MCP and real dump disk-full regression
-        run: python scripts/test-cli-mcp.py --engine mysql --binary target/debug/dbsnap --disk-full
+        run: python scripts/test-cli-mcp.py --engine mysql --binary target/debug/dbsnap --disk-full --docker-sandbox
         env:
           DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/app_admin
+      - name: MySQL failed sandbox replay cleans its container
+        run: cargo test mysql_docker_sandbox_import_failure_cleans_only_created_container -- --nocapture
+        env:
+          DBSNAP_TEST_MYSQL_URL: mysql://root:dbsnap@127.0.0.1:3307/app_admin
+          DBSNAP_TEST_DOCKER_SANDBOX_IMAGE: mysql:8.0
 
   test-mariadb:
     runs-on: ubuntu-latest
@@ -131,9 +136,14 @@ jobs:
         env:
           DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/app_admin
       - name: MariaDB CLI, MCP and real dump disk-full regression
-        run: python scripts/test-cli-mcp.py --engine mysql --binary target/debug/dbsnap --disk-full
+        run: python scripts/test-cli-mcp.py --engine mysql --binary target/debug/dbsnap --disk-full --docker-sandbox
         env:
           DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/app_admin
+      - name: MariaDB failed sandbox replay cleans its container
+        run: cargo test mysql_docker_sandbox_import_failure_cleans_only_created_container -- --nocapture
+        env:
+          DBSNAP_TEST_MYSQL_URL: mariadb://root:dbsnap@127.0.0.1:3308/app_admin
+          DBSNAP_TEST_DOCKER_SANDBOX_IMAGE: mariadb:11
 
   test-storage-full:
     runs-on: ubuntu-latest

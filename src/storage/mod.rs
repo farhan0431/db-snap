@@ -112,6 +112,9 @@ pub struct Metadata {
     pub version: u32,
     pub project_fingerprint: Fingerprint,
     pub snapshots: Vec<SnapshotRecord>,
+    /// Recorded artifacts retired from the active catalog, awaiting deletion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_gc: Vec<SnapshotRecord>,
 }
 
 impl Metadata {
@@ -120,6 +123,7 @@ impl Metadata {
             version: 2,
             project_fingerprint: fingerprint,
             snapshots: Vec::new(),
+            pending_gc: Vec::new(),
         }
     }
 
@@ -178,7 +182,11 @@ impl Metadata {
     }
 
     pub fn ids(&self) -> HashSet<String> {
-        self.snapshots.iter().map(|s| s.id.clone()).collect()
+        self.snapshots
+            .iter()
+            .chain(&self.pending_gc)
+            .map(|s| s.id.clone())
+            .collect()
     }
 
     fn tags_summary(&self) -> String {
@@ -254,7 +262,7 @@ impl Storage {
         let raw = fs::read_to_string(&path).context("reading .dbsnap/metadata.json")?;
         let metadata: Metadata =
             serde_json::from_str(&raw).context("parsing .dbsnap/metadata.json")?;
-        for record in &metadata.snapshots {
+        for record in metadata.snapshots.iter().chain(&metadata.pending_gc) {
             if record.id.is_empty()
                 || record.id.len() > 64
                 || !record
@@ -369,7 +377,7 @@ pub struct LockGuard {
     _file: File,
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut f = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;

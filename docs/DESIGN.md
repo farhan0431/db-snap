@@ -306,3 +306,13 @@ tepatnya ada di README. Matriks pengujian aktual dan perintah reproduksi ada di
 - **SQLite:** tidak ada — bundled.
 - **PostgreSQL:** server lokal berjalan; user DB dengan hak CREATEDB/pemilik; `pg_dump` hanya bila pakai `--method dump`.
 - **MySQL/MariaDB:** server lokal berjalan; `mysqldump`+`mysql` (atau `mariadb-dump`+`mariadb`) di PATH; tabel InnoDB untuk konsistensi `--single-transaction`.
+
+
+## Source follow-up after v0.3.14
+
+See [DEVELOPMENT-WORKFLOW.md](DEVELOPMENT-WORKFLOW.md) for verify/doctor/recover,
+checkpointed exec, offline archive diff, bounded SQLite row previews, sandbox
+forks and resumable pending-GC records. The command layer remains `src/ops.rs`;
+health/row modules share that context and are used by CLI/MCP. Tool responses
+include structured envelopes and explicit output schemas. These additions do
+not turn verification into a restore test or make MySQL replay atomic.
