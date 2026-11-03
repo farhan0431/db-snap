@@ -106,6 +106,8 @@ Pinned snapshots survive `prune`, including `--all`.
 
 PostgreSQL server-side clones are stored on the database server. Use dump mode
 when the snapshot needs to survive removal of that server's data volume.
+For dump save and restore, install `pg_dump` and `pg_restore` matching the
+PostgreSQL server's major version. Mismatched tools are rejected before restore.
 
 ## Safety
 

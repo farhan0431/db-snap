@@ -18,6 +18,36 @@ pub struct PostgresEngine {
 }
 
 impl PostgresEngine {
+    fn client_major(version: &str) -> Option<u32> {
+        version.split_whitespace().find_map(|word| {
+            let first = word.split('.').next()?;
+            first.parse::<u32>().ok()
+        })
+    }
+
+    fn require_matching_client(admin: &mut postgres::Client, bin: &str) -> Result<()> {
+        let output = Command::new(bin)
+            .arg("--version")
+            .output()
+            .with_context(|| {
+                format!("{bin} not found in PATH — install matching PostgreSQL client tools")
+            })?;
+        if !output.status.success() {
+            bail!("could not determine {bin} version");
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let client = Self::client_major(&text)
+            .ok_or_else(|| anyhow::anyhow!("could not parse {bin} version: {text}"))?;
+        let number: String = admin.query_one("SHOW server_version_num", &[])?.get(0);
+        let numeric: u32 = number
+            .parse()
+            .context("invalid PostgreSQL server_version_num")?;
+        let server = numeric / 10000;
+        if client != server {
+            bail!("{bin} major version {client} does not match PostgreSQL server major version {server}; install matching client tools and retry before restoring or saving a dump");
+        }
+        Ok(())
+    }
     pub fn new(pg: ServerTarget) -> Self {
         Self { pg }
     }
@@ -202,34 +232,31 @@ impl PostgresEngine {
         tag: &str,
         taken_ids: &HashSet<String>,
     ) -> Result<SaveOutcome> {
-        let check = Command::new("pg_dump").arg("--version").output();
-        if check.is_err() {
-            bail!(
-                "pg_dump not found in PATH — install the PostgreSQL client tools, or use --method clone (default)"
-            );
-        }
-
         let id = util::new_id(taken_ids);
         let out_path = store.snapshots_dir().join(format!("{id}.dump"));
+        let staged = store.tmp_dir().join(format!("save-{id}.dump"));
         let mut admin = self.maintenance()?;
+        Self::require_matching_client(&mut admin, "pg_dump")?;
         let size = Self::db_size(&mut admin, &self.pg.database)?;
 
         let output = Command::new("pg_dump")
             .args(["-Fc", "-d", &self.pg.connstring(), "-f"])
-            .arg(&out_path)
+            .arg(&staged)
             // password travels via env, never argv (§4-T10)
             .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
             .env_remove("PGHOSTADDR")
             .output()?;
         if !output.status.success() {
+            std::fs::remove_file(&staged).ok();
             bail!(
                 "pg_dump failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
 
-        let file_size = std::fs::metadata(&out_path)?.len();
-        let hash = compress::hash_file(&out_path)?;
+        let file_size = std::fs::metadata(&staged)?.len();
+        let hash = compress::hash_file(&staged)?;
+        std::fs::rename(&staged, &out_path)?;
         let rel = format!("snapshots/{id}.dump");
         Ok(SaveOutcome {
             record: SnapshotRecord {
@@ -380,16 +407,9 @@ impl PostgresEngine {
                 record.blake3
             );
         }
-        if Command::new("pg_restore")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            bail!("pg_restore not found in PATH — install the PostgreSQL client tools");
-        }
-
         let target = &self.pg.database;
         let mut admin = self.maintenance()?;
+        Self::require_matching_client(&mut admin, "pg_restore")?;
         Self::heal(&mut admin, target);
 
         let attrs = admin.query_opt(
@@ -480,7 +500,7 @@ impl PostgresEngine {
         Self::unfence(&mut admin, target)?;
 
         let output = Command::new("pg_restore")
-            .args(["-d", &self.pg.connstring(), "--no-owner"])
+            .args(["-d", &self.pg.connstring(), "--no-owner", "--exit-on-error"])
             .arg(&dump_path)
             .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
             .env_remove("PGHOSTADDR")

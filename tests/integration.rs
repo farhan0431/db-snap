@@ -1024,6 +1024,52 @@ fn postgres_dump_roundtrip() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn postgres_dump_client_version_mismatch_is_rejected_before_save() -> Result<()> {
+    use std::str::FromStr;
+    let Some(url) = pg_setup_test_db("clientversion")? else {
+        return Ok(());
+    };
+    let output = std::process::Command::new("pg_dump")
+        .arg("--version")
+        .output()?;
+    let version = String::from_utf8_lossy(&output.stdout);
+    let client_major = version
+        .split_whitespace()
+        .find_map(|w| w.split('.').next()?.parse::<u32>().ok())
+        .unwrap();
+    let mut conn = postgres::Config::from_str(&url)?.connect(postgres::NoTls)?;
+    let number: String = conn.query_one("SHOW server_version_num", &[])?.get(0);
+    if client_major == number.parse::<u32>()? / 10000 {
+        return Ok(());
+    }
+    drop(conn);
+    let root = temp_root();
+    pg_exec(
+        &url,
+        "CREATE TABLE items (id integer); INSERT INTO items VALUES (1);",
+    )?;
+    init(&root, Path::new(&url))?;
+    let error = ops::save_at(
+        &root,
+        Some(&url),
+        Some("dump".into()),
+        false,
+        false,
+        SaveMethod::Dump,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("does not match PostgreSQL server"));
+    assert_eq!(pg_count(&url)?, 1);
+    assert!(dbsnap::storage::Storage::find(&root)
+        .unwrap()
+        .load_metadata()?
+        .snapshots
+        .is_empty());
+    pg_drop_test_db(&url);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // MySQL/MariaDB — dijalankan hanya bila DBSNAP_TEST_MYSQL_URL menunjuk
 // server uji lokal (CI: service mysql:8 / mariadb:11; lokal: server sendiri).

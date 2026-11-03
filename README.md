@@ -121,6 +121,9 @@ dbsnap unpin "golden seed"      # remove prune protection
 
 `diff` currently supports SQLite snapshots; it does not compare individual row contents.
 When a safety snapshot is enabled, restore stops if it cannot be created.
+PostgreSQL dump save and restore require `pg_dump` and `pg_restore` respectively
+to have the same major version as the target server. A mismatch is rejected
+before the database is changed.
 
 `dbsnap` resolves your database in this order: `--db` flag → `DATABASE_URL`
 from `.env` → common paths (`prisma/dev.db`, `dev.db`, `*.sqlite`, …).
