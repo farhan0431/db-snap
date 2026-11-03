@@ -261,7 +261,7 @@ db-snap/
 │   ├── config.rs      # DATABASE_URL resolution, fingerprinting, host guard
 │   └── util.rs        # redaction, ids, formatting
 ├── tests/             # 29 tests incl. live PostgreSQL/MySQL roundtrips
-├── npm/               # meta package + per-platform binary packages
+├── npm/               # single npm package with bundled platform binaries
 ├── scripts/           # e2e demos: live-writer, PostgreSQL, MySQL
 ├── skill/dbsnap/      # agent skill installed by `dbsnap init`
 ├── docs/DESIGN.md     # full architecture + threat model

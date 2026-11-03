@@ -1,57 +1,34 @@
 #!/usr/bin/env node
 "use strict";
 
-// Launcher for the dbsnap Rust binary. The npm meta package "db-snap"
-// declares per-platform packages (db-snap-<platform>-<arch>) as
-// optionalDependencies; npm installs only the matching one and this script
-// finds and execs it, passing stdin/stdout through untouched (required for
-// MCP mode).
-
+// Run the binary bundled for this operating system and architecture.
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
-const PKGS_BY_TARGET = {
-  "win32-x64": ["@farhan0431/db-snap-win32-x64"],
-  "darwin-arm64": ["db-snap-darwin-arm64"],
-  "darwin-x64": ["db-snap-darwin-x64"],
-  "linux-x64": ["db-snap-linux-x64-gnu", "db-snap-linux-x64-musl"],
-  "linux-arm64": ["db-snap-linux-arm64"],
-};
-
-function fail(msg) {
-  console.error("dbsnap: " + msg);
+function fail(message) {
+  console.error("dbsnap: " + message);
   process.exit(1);
 }
 
-function resolveBinary() {
-  const target = `${process.platform}-${process.arch}`;
-  const candidates = PKGS_BY_TARGET[target];
-  if (!candidates) {
-    fail(
-      `no prebuilt binary for ${target}. Supported: ${Object.keys(PKGS_BY_TARGET).join(", ")}. ` +
-        `Build from source: cargo install --git https://github.com/farhan0431/db-snap`
-    );
-  }
-  for (const pkg of candidates) {
-    try {
-      const pkgJson = require.resolve(path.join(pkg, "package.json"), {
-        paths: [__dirname, process.cwd()],
-      });
-      const dir = path.dirname(pkgJson);
-      const bin = path.join(dir, "bin", process.platform === "win32" ? "dbsnap.exe" : "dbsnap");
-      if (fs.existsSync(bin)) return bin;
-    } catch {
-      // try the next candidate (e.g. musl fallback)
-    }
-  }
-  fail(
-    `binary for ${target} is not installed. Reinstall with: npm i -g @farhan0431/db-snap ` +
-      `(if you installed with --no-optional / --ignore-scripts the platform package was skipped)`
-  );
+const targets = {
+  "win32-x64": "x86_64-pc-windows-msvc",
+  "darwin-arm64": "aarch64-apple-darwin",
+  "darwin-x64": "x86_64-apple-darwin",
+  "linux-arm64": "aarch64-unknown-linux-gnu",
+};
+const platform = `${process.platform}-${process.arch}`;
+let target = targets[platform];
+if (platform === "linux-x64") {
+  const report = process.report && process.report.getReport();
+  target = report && report.header.glibcVersionRuntime
+    ? "x86_64-unknown-linux-gnu"
+    : "x86_64-unknown-linux-musl";
 }
-
-const bin = resolveBinary();
-const child = spawn(bin, process.argv.slice(2), { stdio: "inherit" });
-child.on("error", (err) => fail(`failed to launch ${bin}: ${err.message}`));
+if (!target) fail(`no bundled binary for ${platform}`);
+const binary = path.join(__dirname, "..", "binaries", target,
+  process.platform === "win32" ? "dbsnap.exe" : "dbsnap");
+if (!fs.existsSync(binary)) fail(`bundled binary is missing for ${target}; reinstall @farhan0431/db-snap`);
+const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
+child.on("error", (err) => fail(`failed to launch ${binary}: ${err.message}`));
 child.on("close", (code) => process.exit(code ?? 1));

@@ -24,6 +24,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test
+      - name: Test npm launcher
+        run: node npm/test/launcher.test.js
 
   test-postgres:
     runs-on: ubuntu-latest
