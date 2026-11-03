@@ -2,7 +2,7 @@
 
 Instructions for AI coding agents working **on this repository** (db-snap
 itself). If you are instead looking to **install db-snap as a tool** for a
-user: do NOT clone or build this repo — run `npm i -g db-snap` and register
+user: do NOT clone or build this repo — run `npm i -g @farhan0431/db-snap` and register
 the MCP server (see [INSTALL.md](INSTALL.md)).
 
 ## Build & verify

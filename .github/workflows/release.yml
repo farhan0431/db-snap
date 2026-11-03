@@ -5,7 +5,7 @@ name: Release
 # binaries to a GitHub Release.
 #
 # Required secret: NPM_TOKEN (automation token with publish rights to the
-# db-snap scope-less package and the db-snap-* platform packages).
+# @farhan0431/db-snap package and the db-snap-* platform packages).
 
 on:
   push:

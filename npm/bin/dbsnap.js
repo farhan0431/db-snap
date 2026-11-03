@@ -46,7 +46,7 @@ function resolveBinary() {
     }
   }
   fail(
-    `binary for ${target} is not installed. Reinstall with: npm i -g db-snap ` +
+    `binary for ${target} is not installed. Reinstall with: npm i -g @farhan0431/db-snap ` +
       `(if you installed with --no-optional / --ignore-scripts the platform package was skipped)`
   );
 }

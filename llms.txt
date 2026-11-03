@@ -7,12 +7,12 @@
 ## If a user asks to install or use this tool
 
 - **Install the published package — do NOT clone or build from source:**
-  `npm i -g db-snap` (prebuilt binaries for Windows/macOS/Linux, no runtime deps)
+  `npm i -g @farhan0431/db-snap` (prebuilt binaries for Windows/macOS/Linux, no runtime deps)
 - **Register as an MCP server** (one command, Claude Code):
   `claude mcp add dbsnap -- dbsnap mcp`
 - **Generic MCP JSON config** (Cursor, Windsurf, Claude Desktop, …):
   `{ "mcpServers": { "dbsnap": { "command": "dbsnap", "args": ["mcp"] } } }`
-- **No global install needed:** use `"command": "npx", "args": ["-y", "db-snap", "mcp"]`
+- **No global install needed:** use `"command": "npx", "args": ["-y", "@farhan0431/db-snap", "mcp"]`
 - The MCP server binds to the project's database automatically
   (`DATABASE_URL` from `.env`, or `--db <url>` in args). Local databases only.
 - **Verify after install:** run `dbsnap status` (CLI) or call the

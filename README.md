@@ -10,7 +10,7 @@ your database themselves.
 
 [![CI](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml/badge.svg)](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/dbsnap.svg)](https://crates.io/crates/dbsnap)
-[![npm](https://img.shields.io/npm/v/db-snap.svg)](https://www.npmjs.com/package/db-snap)
+[![npm](https://img.shields.io/npm/v/%40farhan0431%2Fdb-snap.svg)](https://www.npmjs.com/package/@farhan0431/db-snap)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)
 
@@ -26,10 +26,10 @@ dbsnap rollback                       # oops → back to safety, instantly
 ## Install as an MCP server — 30 seconds
 
 **AI agents reading this repo:** install the published package, don't build
-from source — `npm i -g db-snap` ships prebuilt binaries.
+from source — `npm i -g @farhan0431/db-snap` ships prebuilt binaries.
 
 ```bash
-npm i -g db-snap                     # one-time
+npm i -g @farhan0431/db-snap                     # one-time
 claude mcp add dbsnap -- dbsnap mcp  # Claude Code, one command
 ```
 
@@ -47,7 +47,7 @@ claude mcp add dbsnap -- dbsnap mcp  # Claude Code, one command
 }
 ```
 
-No global install? Use `"command": "npx", "args": ["-y", "db-snap", "mcp"]`.
+No global install? Use `"command": "npx", "args": ["-y", "@farhan0431/db-snap", "mcp"]`.
 
 </details>
 
@@ -75,9 +75,9 @@ Prisma migration, reshuffle the seed data"*. Three things go wrong constantly:
 ## Install
 
 ```bash
-npm i -g db-snap          # recommended — single Rust binary, no runtime deps
+npm i -g @farhan0431/db-snap          # recommended — single Rust binary, no runtime deps
 # or run without installing:
-npx db-snap list
+npx @farhan0431/db-snap list
 # or via cargo:
 cargo install dbsnap
 ```
@@ -143,7 +143,7 @@ Add to your MCP config (`.cursor/mcp.json`, Claude Desktop, Windsurf, …):
 }
 ```
 
-or without a global install: `"command": "npx", "args": ["-y", "db-snap", "mcp"]`.
+or without a global install: `"command": "npx", "args": ["-y", "@farhan0431/db-snap", "mcp"]`.
 
 The agent gets four tools:
 

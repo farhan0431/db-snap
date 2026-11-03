@@ -7,11 +7,11 @@ the npm package ships prebuilt Rust binaries for Windows, macOS, and Linux.
 ## Step 1 — install the CLI (one time)
 
 ```bash
-npm i -g db-snap
+npm i -g @farhan0431/db-snap
 ```
 
 Alternative without a global install: everything below also works with
-`npx -y db-snap` in place of the `dbsnap` command.
+`npx -y @farhan0431/db-snap` in place of the `dbsnap` command.
 
 Verify:
 
@@ -60,7 +60,7 @@ Same JSON as Cursor (Settings → Developer → Edit Config).
   "mcpServers": {
     "dbsnap": {
       "command": "npx",
-      "args": ["-y", "db-snap", "mcp"]
+      "args": ["-y", "@farhan0431/db-snap", "mcp"]
     }
   }
 }
@@ -103,7 +103,7 @@ dbsnap prune --keep 5
 ## Troubleshooting
 
 - **`dbsnap: command not found`** — the npm global bin folder is not on
-  `PATH`; reinstall with `npm i -g db-snap` or use the `npx` variant.
+  `PATH`; reinstall with `npm i -g @farhan0431/db-snap` or use the `npx` variant.
 - **No database found** — run `dbsnap init --db <path-or-url>` in the
   project, or set `DATABASE_URL` in `.env`.
 - **"this project is bound to …"** — the project is already bound to
