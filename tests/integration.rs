@@ -24,6 +24,46 @@ fn bounded_rows_detect_updates_without_disclosing_values() -> Result<()> {
     assert_eq!(parsed["updated"], 1);
     assert!(!report.contains("private-new-value"));
     assert!(!report.contains("secret"));
+    let selected = vec!["name".to_owned()];
+    let filtered = ops::diff_rows_options_at(
+        &root,
+        db.to_str(),
+        "before",
+        "after",
+        "users",
+        1,
+        &ops::RowOptions {
+            columns: &selected,
+            key_min: Some(1),
+            key_max: Some(1),
+            ..Default::default()
+        },
+    )?;
+    let filtered: serde_json::Value = serde_json::from_str(&filtered)?;
+    assert_eq!(filtered["added"], 0);
+    assert_eq!(filtered["removed"], 0);
+    assert_eq!(filtered["updated"], 1);
+    let keys_only = vec!["id".to_owned()];
+    let filtered = ops::diff_rows_options_at(
+        &root,
+        db.to_str(),
+        "before",
+        "after",
+        "users",
+        1,
+        &ops::RowOptions {
+            columns: &keys_only,
+            key_min: Some(1),
+            key_max: Some(1),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&filtered)?["updated"],
+        0
+    );
+    // A self-comparison still validates the row limit.
+    assert!(ops::diff_rows_at(&root, db.to_str(), "before", "before", "users", 1).is_err());
     let preview = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
         .current_dir(&root)
         .args([

@@ -50,6 +50,7 @@ pub(crate) fn start(store: &Storage, record: &SnapshotRecord, image: &str) -> Re
         &record.blake3,
         record.original_bytes,
     )?;
+    let owner = owner_label(store)?;
     // No source credentials, published ports, shared network or host mounts.
     // SQL retains its original database identifiers inside this separate server.
     let output = Command::new("docker")
@@ -60,6 +61,8 @@ pub(crate) fn start(store: &Storage, record: &SnapshotRecord, image: &str) -> Re
             "none",
             "--label",
             "dbsnap.sandbox=true",
+            "--label",
+            &format!("dbsnap.project={owner}"),
             "--name",
             &format!("dbsnap-sandbox-{token}"),
             "-e",
@@ -129,6 +132,38 @@ pub(crate) fn start(store: &Storage, record: &SnapshotRecord, image: &str) -> Re
     })();
     cleanup_on_error(&id, result)?;
     Ok(id)
+}
+
+fn owner_label(store: &Storage) -> Result<String> {
+    let path = store.root.canonicalize()?;
+    // Docker labels contain only a digest. Binding ownership to the canonical
+    // project path also prevents a copied registry from deleting resources.
+    let identity = serde_json::to_vec(&(path, store.load_config()?))?;
+    Ok(blake3::hash(&identity).to_hex().to_string())
+}
+
+pub(crate) fn remove_owned(store: &Storage, id: &str) -> Result<()> {
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("sandbox removal requires the exact full container ID");
+    }
+    let output = Command::new("docker")
+        .args(["inspect", "--type", "container", id])
+        .output()?;
+    if !output.status.success() {
+        bail!("unable to inspect the registered sandbox in the current Docker context");
+    }
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
+    let [entry] = entries.as_slice() else {
+        bail!("Docker returned an unexpected number of containers");
+    };
+    let labels = &entry["Config"]["Labels"];
+    if entry["Id"].as_str() != Some(id)
+        || labels["dbsnap.sandbox"] != "true"
+        || labels["dbsnap.project"].as_str() != Some(owner_label(store)?.as_str())
+    {
+        bail!("sandbox ownership could not be verified; inspect it and clean it up manually");
+    }
+    remove(id)
 }
 
 fn cleanup_on_error(id: &str, result: Result<()>) -> Result<()> {

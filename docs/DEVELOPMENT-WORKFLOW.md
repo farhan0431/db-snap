@@ -92,6 +92,7 @@ encoded-value budget per snapshot fail with an error.
 
 ```sh
 dbsnap diff-rows before after --table users --format git --show-values
+dbsnap diff-rows before after --table users --column role --key-min 100 --key-max 199
 dbsnap diff-rows before after --table public.users --replay-dumps
 dbsnap diff-rows before after --table users --docker-image mysql:8.0
 ```
@@ -109,6 +110,19 @@ Temporary replay resources are removed on normal completion and errors.
 Interrupted processes can leave managed resources behind. Server values are
 compared using their serialized forms, so a spelling change in a
 case-insensitive key may appear as a removal and an addition.
+
+Repeat `--column` to compare only selected columns and the primary key. The
+inclusive `--key-min` and `--key-max` bounds require one integer primary key.
+SQLite bounds select rows whose stored key is an integer. The row and byte
+limits apply after selection. Filters reduce row inspection work. Dump-based
+engines still prepare the snapshot before running the filtered query.
+
+For automation, run `dbsnap diff-report BEFORE AFTER --fail-on-drop-table`.
+It writes a bounded JSON report with the exact snapshot IDs and table-drop
+count. Exit 3 means the policy was violated, and exit 1 means the comparison
+failed. The policy supports SQLite snapshots, PostgreSQL clones and standard
+MySQL/MariaDB dumps. PostgreSQL archive reports compare COPY inventories and
+reject the table-drop policy.
 
 ## Transfer a snapshot
 
@@ -171,6 +185,24 @@ and require explicit cleanup (`docker rm -f -v ID`). Abrupt process termination
 can leave a container labelled `dbsnap.sandbox=true` for manual inspection.
 
 Point your application at the sandbox explicitly before running migrations.
+
+### Inspect registered sandboxes
+
+Run `dbsnap sandbox-list` for JSON records with the source snapshot ID and
+resource state. `dbsnap doctor` includes the same inventory. A file, database,
+or labelled container can be `present`, `missing`, or `unknown` when its
+backend cannot be checked. Docker status reflects the current Docker context.
+A presence check provides no proof of ownership for deletion.
+
+New SQLite sandbox files are registered. Older SQLite files and resources
+left behind before registration require manual inspection. Close sandbox
+clients before manual cleanup.
+
+`dbsnap sandbox-remove CONTAINER_ID` stops and removes a Docker sandbox and
+its anonymous volumes after checking the full registered container ID and
+project ownership label. This applies to newly created MySQL/MariaDB
+sandboxes. Earlier Docker sandboxes, SQLite files, and PostgreSQL sandboxes
+require explicit manual cleanup.
 
 ## Resumable recorded garbage collection
 

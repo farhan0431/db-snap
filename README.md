@@ -168,9 +168,13 @@ dbsnap exec -- npm run db:migrate # checkpoint before a command; no automatic ro
 dbsnap diff-live before         # capture/retain live checkpoint and compare
 dbsnap diff-rows before after --table users # bounded primary-key row-change counts
 dbsnap diff-rows before after --table users --format git --show-values
+dbsnap diff-rows before after --table users --column role --key-min 100 --key-max 199
+dbsnap diff-report before after --fail-on-drop-table
 dbsnap export before --output before.dbsnap
 dbsnap import before.dbsnap --tag transferred
 dbsnap sandbox before --output ./experiment.db # new independent SQLite file
+dbsnap sandbox-list             # recorded sandboxes and their current state
+dbsnap sandbox-remove CONTAINER_ID # remove an owned Docker sandbox
 ```
 
 `diff` supports SQLite snapshots, PostgreSQL server-side clone snapshots, and
@@ -392,45 +396,6 @@ machine:
 | PostgreSQL `DROP COLUMN` → rollback | 50 rows + column verified back bit-for-bit via `psql` |
 | MySQL/MariaDB restore | Object restore and recovery tested on disposable databases |
 
-## Roadmap
-
-**Released through v0.4.0**
-
-- [x] SQLite delta snapshots, PostgreSQL clones and dumps, and MySQL/MariaDB dumps
-- [x] CLI and MCP checkpoint, restore, verification, diagnosis, and recovery
-- [x] Schema and row-count diffs, SQLite row previews, and sandbox creation
-- [x] npm distribution with prebuilt binaries and resumable catalog cleanup
-
-**v0.4.1 validated for release**
-
-- [x] Portable archive export/import, server row previews, and Git-style CLI diff
-- [x] Sandboxes from trusted PostgreSQL custom dumps
-- [x] Test partial archive rejection and PostgreSQL interruption after replay
-- [x] Validate hosted CI, six release builds, and CLI/MCP from the packed npm package
-
-See the [v0.4.1 pre-release run](https://github.com/farhan0431/db-snap/actions/runs/41775572622).
-
-**Next priorities**
-
-1. **Manage sandboxes.** List registered sandboxes and their source snapshot,
-   show stale entries in `doctor`, and remove a specific sandbox after
-   checking resource ownership.
-2. **Report migration checks in CI.** Add bounded machine-readable reports,
-   with optional failure rules for changes such as dropped tables. Keep
-   rehearsal and rollout as separate steps.
-3. **Make row previews practical on larger tables.** Add primary-key range
-   and column filters. Keep the current preview bounds and privacy defaults.
-4. **Improve transfer and recovery.** Explore opt-in sanitized fixture
-   exports. Expand failure tests for disk, network, and process interruptions.
-
-Start with sandbox listing and stale-resource reporting. Add removal once
-ownership checks and interruption tests cover every supported sandbox type.
-For CI reports, keep the first version focused on explicit policies for schema
-changes and a JSON summary that teams can archive with their migration logs.
-
-See [audit status](docs/AUDIT-STATUS.md) for engine-specific safety gaps and
-[development workflow](docs/DEVELOPMENT-WORKFLOW.md) for current behavior.
-
 ## Repository layout
 
 ```text
@@ -452,7 +417,8 @@ db-snap/
 
 ## Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Security issues:
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[maintainer roadmap](docs/MAINTAINER-ROADMAP.md) for upcoming work. Security issues:
 [SECURITY.md](SECURITY.md) (private disclosure, please).
 
 ## License

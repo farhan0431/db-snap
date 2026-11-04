@@ -46,6 +46,9 @@ fences database connections.
   and accepts `schema.table` for ordinary tables. The default limit is 10,000
   rows per snapshot. Set `limit` in MCP or `--limit` on the CLI up to
   100,000. The encoded value budget is 16 MiB per snapshot.
+  Use repeated CLI `--column` or MCP `columns` to focus the comparison.
+  CLI `--key-min` and `--key-max` or MCP `key_min` and `key_max` select an
+  inclusive range for one integer primary key.
 - Use `--format git --show-values` only when the user wants stored values
   displayed. Keep terminal output private. Git output shows schema changes
   instead of row changes when column layouts differ. MCP returns counts.
@@ -71,6 +74,12 @@ fixtures in shared environments. Checksums detect corruption. A restore is
 a separate operation. Retain the created sandbox identifier for explicit
 cleanup. PostgreSQL sandbox names are recorded in `.dbsnap/sandboxes.json`.
 An interrupted replay can leave temporary resources behind.
+Use `dbsnap sandbox-list` to find registered resources. CLI
+`dbsnap sandbox-remove CONTAINER_ID` removes a Docker sandbox after checking
+the registered full ID and project label. SQLite and PostgreSQL require
+manual cleanup. Use `dbsnap diff-report BEFORE AFTER --fail-on-drop-table`
+for a bounded JSON migration check. Exit 3 indicates a policy violation.
+The drop policy requires PostgreSQL clones when comparing PostgreSQL snapshots.
 
 ## Restore and recovery
 

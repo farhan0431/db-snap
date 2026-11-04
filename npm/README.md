@@ -149,6 +149,9 @@ file; review it against the repository's current skill when upgrading.
 | `dbsnap sandbox before --output experiment.db` | Fork SQLite into a new file; existing files are never overwritten. |
 | `dbsnap sandbox before` | Create an independent PostgreSQL clone, recorded in `sandboxes.json`. |
 | `dbsnap sandbox before --docker-image mysql:8.0` | Explicit isolated MySQL server; use `mariadb:11` for MariaDB. Docker required. |
+| `dbsnap sandbox-list` | In development for v0.4.1. List recorded sandboxes, their source snapshots, and resource state. |
+| `dbsnap sandbox-remove CONTAINER_ID` | Remove a newly created Docker sandbox after verifying its project ownership. |
+| `dbsnap diff-report before after --fail-on-drop-table` | Bounded JSON for automation. Exit 3 means a table was removed. |
 
 `dbsnap list --json` and `dbsnap status --json` provide machine-readable output.
 Pinned snapshots survive `prune`, including `--all`.

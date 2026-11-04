@@ -61,6 +61,15 @@ impl MysqlEngine {
         left: &SnapshotRecord,
         right: &SnapshotRecord,
     ) -> Result<String> {
+        Ok(self.schema_diff(store, left, right)?.text)
+    }
+
+    pub(crate) fn schema_diff(
+        &self,
+        store: &Storage,
+        left: &SnapshotRecord,
+        right: &SnapshotRecord,
+    ) -> Result<super::SchemaDiff> {
         fn stage(
             store: &Storage,
             record: &SnapshotRecord,

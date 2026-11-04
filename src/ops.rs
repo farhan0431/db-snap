@@ -15,7 +15,7 @@ mod portable;
 mod rows;
 pub use health::{
     diff_live_at, diff_live_with, doctor_at, doctor_with, exec_at, recover_at, recover_with,
-    sandbox_at, verify_at, verify_with,
+    sandbox_at, sandbox_list_at, sandbox_remove_at, verify_at, verify_with,
 };
 pub use portable::{export_at, import_at};
 pub use rows::{
@@ -517,23 +517,77 @@ pub fn diff_at(root: &Path, explicit: Option<&str>, from: &str, to: &str) -> Res
 }
 
 pub fn diff_with(ctx: &Ctx, from: &str, to: &str) -> Result<String> {
+    Ok(schema_diff_with(ctx, from, to, false)?.0.text)
+}
+
+pub fn diff_report_at(
+    root: &Path,
+    explicit: Option<&str>,
+    from: &str,
+    to: &str,
+    fail_on_drop_table: bool,
+) -> Result<(String, bool)> {
+    let mut violated = false;
+    let output = redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        let (diff, left, right) = schema_diff_with(&ctx, from, to, fail_on_drop_table)?;
+        let count = diff.removed_tables.len();
+        violated = fail_on_drop_table && count > 0;
+        let truncate = |text: &str, max: usize| {
+            let mut len = text.len().min(max);
+            while !text.is_char_boundary(len) {
+                len -= 1;
+            }
+            util::mask(&text[..len])
+        };
+        let names: Vec<_> = diff
+            .removed_tables
+            .iter()
+            .take(50)
+            .map(|name| truncate(name, 256))
+            .collect();
+        let summary = truncate(&diff.text, 8192);
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1, "engine": left.engine, "from": left.id, "to": right.id,
+            "snapshot_methods": [left.method, right.method],
+            "removed_table_count": count, "removed_tables": names,
+            "removed_tables_truncated": count > 50 || diff.removed_tables.iter().any(|name| name.len() > 256),
+            "summary": summary, "summary_truncated": diff.text.len() > 8192,
+            "policy": { "fail_on_drop_table": fail_on_drop_table, "violated": violated }
+        }))?)
+    })())?;
+    Ok((output, violated))
+}
+
+fn schema_diff_with(
+    ctx: &Ctx,
+    from: &str,
+    to: &str,
+    drop_policy: bool,
+) -> Result<(engine::SchemaDiff, SnapshotRecord, SnapshotRecord)> {
     let _lock = ctx.store.lock()?;
     ensure_active_binding(ctx)?;
     let meta = ctx.store.load_metadata()?;
     let left = meta.find(Some(from))?;
     let right = meta.find(Some(to))?;
-    match &ctx.db.target {
+    if drop_policy && (left.method == "pg-dump" || right.method == "pg-dump") {
+        bail!(
+            "table drop policy requires PostgreSQL clones; archive diff only inventories COPY data"
+        );
+    }
+    let diff = match &ctx.db.target {
         DbTarget::Sqlite(path) if left.engine == "sqlite" && right.engine == "sqlite" => {
-            engine::sqlite::SqliteEngine::new(path.clone()).diff(&ctx.store, &left, &right)
+            engine::sqlite::SqliteEngine::new(path.clone()).schema_diff(&ctx.store, &left, &right)
         }
         DbTarget::Postgres(pg) if left.engine == "postgres" && right.engine == "postgres" => {
-            engine::postgres::PostgresEngine::new(pg.clone()).diff(&ctx.store, &left, &right)
+            engine::postgres::PostgresEngine::new(pg.clone()).schema_diff(&ctx.store, &left, &right)
         }
         DbTarget::Mysql(target) if left.engine == "mysql" && right.engine == "mysql" => {
-            engine::mysql::MysqlEngine::new(target.clone()).diff(&ctx.store, &left, &right)
+            engine::mysql::MysqlEngine::new(target.clone()).schema_diff(&ctx.store, &left, &right)
         }
         _ => bail!("snapshot diff is not supported for these snapshot types"),
-    }
+    }?;
+    Ok((diff, left, right))
 }
 
 pub fn list_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {

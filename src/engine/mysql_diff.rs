@@ -169,13 +169,17 @@ fn inspect(reader: impl BufRead) -> Result<Tables> {
     Ok(tables)
 }
 
-pub(super) fn compare(left: impl BufRead, right: impl BufRead) -> Result<String> {
+pub(super) fn compare(left: impl BufRead, right: impl BufRead) -> Result<super::SchemaDiff> {
     let a = inspect(left)?;
     let b = inspect(right)?;
     let mut changes = Vec::new();
+    let mut removed_tables = Vec::new();
     for (name, old) in &a {
         match b.get(name) {
-            None => changes.push(format!("removed table {name}")),
+            None => {
+                removed_tables.push(name.clone());
+                changes.push(format!("removed table {name}"));
+            }
             Some(new) => {
                 if old.0 != new.0 {
                     changes.push(format!("changed schema table {name}"));
@@ -194,7 +198,10 @@ pub(super) fn compare(left: impl BufRead, right: impl BufRead) -> Result<String>
     if changes.is_empty() {
         changes.push("no table schema or row-count differences".into());
     }
-    Ok(format!("{}\n(row contents, views, routines, triggers and events are not compared; standard dbsnap dump format only)", changes.join("\n")))
+    Ok(super::SchemaDiff {
+        text: format!("{}\n(row contents, views, routines, triggers and events are not compared; standard dbsnap dump format only)", changes.join("\n")),
+        removed_tables,
+    })
 }
 
 #[cfg(test)]
@@ -214,8 +221,8 @@ mod tests {
         let a = "CREATE TABLE `a``b` (\n id int\n) ENGINE=InnoDB AUTO_INCREMENT=2;\nINSERT INTO `a``b` VALUES (1);\n";
         let b = "CREATE TABLE `a``b` (\n id int\n) ENGINE=InnoDB AUTO_INCREMENT=3;\nINSERT INTO `a``b` VALUES (1),(2);\n";
         let result = compare(a.as_bytes(), b.as_bytes()).unwrap();
-        assert!(result.contains("rows: 1 -> 2"));
-        assert!(!result.contains("changed schema"));
+        assert!(result.text.contains("rows: 1 -> 2"));
+        assert!(!result.text.contains("changed schema"));
     }
 
     #[test]

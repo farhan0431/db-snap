@@ -128,7 +128,7 @@ pub(super) fn compare(
     store: &Storage,
     left: &SnapshotRecord,
     right: &SnapshotRecord,
-) -> Result<String> {
+) -> Result<super::SchemaDiff> {
     let a_schema = schema(store, left)?;
     let b_schema = schema(store, right)?;
     let (_a_guard, a_path) = extract(store, left, "--data-only")?;
@@ -136,13 +136,17 @@ pub(super) fn compare(
     let a = counts(BufReader::new(std::fs::File::open(a_path)?))?;
     let b = counts(BufReader::new(std::fs::File::open(b_path)?))?;
     let mut changes = Vec::new();
+    let mut removed_tables = Vec::new();
     if a_schema != b_schema {
         changes
             .push("changed PostgreSQL archive schema (normalized pg_restore schema output)".into());
     }
     for (name, old) in &a {
         match b.get(name) {
-            None => changes.push(format!("removed table {name}")),
+            None => {
+                removed_tables.push(name.clone());
+                changes.push(format!("removed table {name}"));
+            }
             Some(new) if new != old => changes.push(format!("table {name} rows: {old} -> {new}")),
             _ => {}
         }
@@ -155,7 +159,10 @@ pub(super) fn compare(
     if changes.is_empty() {
         changes.push("no archive schema or table row-count differences".into());
     }
-    Ok(format!("{}\n(row contents and sequence values are not compared; schema changes are archive-wide; standard COPY archives only; SQL was not executed)",changes.join("\n")))
+    Ok(super::SchemaDiff {
+        text: format!("{}\n(row contents and sequence values are not compared; schema changes are archive-wide; standard COPY archives only; SQL was not executed)", changes.join("\n")),
+        removed_tables,
+    })
 }
 
 #[cfg(test)]

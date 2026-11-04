@@ -142,6 +142,22 @@ fn tools_call(
                     "dump replay requires an authorized MCP session and per-call approval",
                 ));
             }
+            let columns = match args.get("columns") {
+                None => Vec::new(),
+                Some(value) => match value.as_array().and_then(|values| {
+                    values
+                        .iter()
+                        .map(|v| v.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                }) {
+                    Some(columns) => columns,
+                    None => return Ok(error_result("columns must be an array of strings")),
+                },
+            };
+            let bounds = |field| args.get(field).map(|v| v.as_i64().ok_or(field)).transpose();
+            let (Ok(key_min), Ok(key_max)) = (bounds("key_min"), bounds("key_max")) else {
+                return Ok(error_result("key_min and key_max must be signed integers"));
+            };
             ops::diff_rows_options_with(
                 ctx,
                 from,
@@ -151,6 +167,9 @@ fn tools_call(
                 &ops::RowOptions {
                     replay_dumps,
                     docker_image,
+                    columns: &columns,
+                    key_min,
+                    key_max,
                     ..Default::default()
                 },
             )

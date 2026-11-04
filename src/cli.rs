@@ -15,6 +15,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Produce a bounded JSON schema diff for CI
+    DiffReport {
+        from: String,
+        to: String,
+        #[arg(long)]
+        db: Option<String>,
+        /// Exit 3 if a table was removed
+        #[arg(long)]
+        fail_on_drop_table: bool,
+    },
     /// Write a portable snapshot archive to a new file
     Export {
         snapshot: String,
@@ -39,6 +49,15 @@ pub enum Command {
         table: String,
         #[arg(long, default_value_t = 10000)]
         limit: usize,
+        /// Compare this column and the primary key. Repeat for multiple columns.
+        #[arg(long = "column")]
+        columns: Vec<String>,
+        /// Inclusive lower bound for a single integer primary key
+        #[arg(long, allow_negative_numbers = true)]
+        key_min: Option<i64>,
+        /// Inclusive upper bound for a single integer primary key
+        #[arg(long, allow_negative_numbers = true)]
+        key_max: Option<i64>,
         #[arg(long, default_value = "json", value_parser = ["json", "git"])]
         format: String,
         /// Include stored row values in the Git-style terminal preview
@@ -69,6 +88,17 @@ pub enum Command {
         /// Explicit isolated Docker server for MySQL/MariaDB; never publishes ports
         #[arg(long, value_parser=["mysql:8.0","mariadb:11"])]
         docker_image: Option<String>,
+    },
+    /// List recorded sandboxes and check whether their resources still exist
+    SandboxList {
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Remove a registered Docker sandbox after verifying project ownership
+    SandboxRemove {
+        container_id: String,
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Check snapshot artifact integrity without replaying or restoring SQL
     Verify {

@@ -21,6 +21,18 @@ fn run(command: Command) -> i32 {
     };
 
     let result = match command {
+        Command::DiffReport {
+            from,
+            to,
+            db,
+            fail_on_drop_table,
+        } => match ops::diff_report_at(&root, db.as_deref(), &from, &to, fail_on_drop_table) {
+            Ok((report, violated)) => {
+                println!("{report}");
+                return if violated { 3 } else { 0 };
+            }
+            Err(error) => Err(error),
+        },
         Command::Export {
             snapshot,
             output,
@@ -34,6 +46,9 @@ fn run(command: Command) -> i32 {
             to,
             table,
             limit,
+            columns,
+            key_min,
+            key_max,
             format,
             show_values,
             replay_dumps,
@@ -51,6 +66,9 @@ fn run(command: Command) -> i32 {
                 git: format == "git",
                 replay_dumps,
                 docker_image: docker_image.as_deref(),
+                columns: &columns,
+                key_min,
+                key_max,
             },
         ),
         Command::DiffLive { tag_or_id, db } => ops::diff_live_at(&root, db.as_deref(), &tag_or_id),
@@ -66,6 +84,10 @@ fn run(command: Command) -> i32 {
             output.as_deref(),
             docker_image.as_deref(),
         ),
+        Command::SandboxList { db } => ops::sandbox_list_at(&root, db.as_deref()),
+        Command::SandboxRemove { container_id, db } => {
+            ops::sandbox_remove_at(&root, db.as_deref(), &container_id)
+        }
         Command::Verify { tag_or_id, db } => {
             ops::verify_at(&root, db.as_deref(), tag_or_id.as_deref())
         }

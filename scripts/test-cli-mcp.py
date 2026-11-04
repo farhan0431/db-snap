@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit, unquote
 
@@ -146,6 +147,11 @@ def main():
         def rows():
             return int(sql("SELECT COUNT(*) FROM items"))
 
+        def sandbox_state(snapshot_id, state, operation="sandbox-list"):
+            report = json.loads(cli(operation))
+            assert any(s["snapshot_id"] == snapshot_id and s["state"] == state
+                       for s in report["sandboxes"]), report
+
         def interrupted(failpoint, *args):
             env = dict(os.environ, DBSNAP_FAILPOINT=failpoint)
             result = subprocess.run([str(binary), *args, "--db", url], cwd=root,
@@ -172,11 +178,14 @@ def main():
                 fork = root / "experiment.db"
                 fork_result = json.loads(cli("sandbox", "before", "--output", str(fork)))
                 assert fork_result["source_modified"] is False
+                sandbox_state(fork_result["snapshot_id"], "present")
                 with closing(sqlite3.connect(fork)) as connection:
                     assert connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
                     connection.execute("DELETE FROM items")
                     connection.commit()
                 assert rows() == 2
+                fork.unlink()
+                sandbox_state(fork_result["snapshot_id"], "missing", "doctor")
             elif options.engine == "postgres":
                 sandbox = json.loads(cli("sandbox", "before"))
                 assert sandbox["source_modified"] is False
@@ -187,11 +196,13 @@ def main():
                 fork = registry[-1]["name"]
                 assert fork.startswith("__dbsnap_sandbox_") and fork.replace('_','').isalnum()
                 try:
+                    sandbox_state(sandbox["snapshot_id"], "present")
                     assert sql("SELECT COUNT(*) FROM items", database_override=fork) == "1"
                     sql("DELETE FROM items", database_override=fork)
                     assert rows() == 2, "sandbox writes must not change source"
                 finally:
                     sql(f'DROP DATABASE "{fork}"', admin=True)
+                sandbox_state(sandbox["snapshot_id"], "missing", "doctor")
             else:
                 cli("sandbox", "before", error=True)
                 if options.docker_sandbox:
@@ -200,7 +211,11 @@ def main():
                     sandbox=json.loads(cli("sandbox","before","--docker-image",image))
                     container=sandbox["container_id"]
                     assert len(container)==64 and all(c in '0123456789abcdef' for c in container)
+                    registry_file = root / ".dbsnap" / "sandboxes.json"
+                    original_registry = registry_file.read_bytes()
+                    removed = False
                     try:
+                        sandbox_state(sandbox["snapshot_id"], "present")
                         inspected=json.loads(checked(["docker","inspect",container]))[0]
                         assert inspected["HostConfig"]["NetworkMode"]=="none"
                         assert not inspected["HostConfig"]["PortBindings"]
@@ -208,8 +223,22 @@ def main():
                         assert count.strip()=="1", count
                         checked(["docker","exec",container,client,"--no-defaults","-uroot","-e",f"DELETE FROM `{name}`.items"])
                         assert rows()==2, "sandbox writes must not change source"
+                        cli("sandbox-remove", container[:12], error=True)
+                        with tempfile.TemporaryDirectory(prefix="dbsnap-other-owner-") as other:
+                            checked([str(binary), "init", "--db", url], cwd=other)
+                            (Path(other) / ".dbsnap" / "sandboxes.json").write_bytes(original_registry)
+                            denied = subprocess.run([str(binary), "sandbox-remove", container, "--db", url],
+                                                    cwd=other, capture_output=True, text=True, timeout=120)
+                            assert denied.returncode != 0 and "ownership could not be verified" in denied.stderr
+                        sandbox_state(sandbox["snapshot_id"], "present")
+                        assert json.loads(cli("sandbox-remove", container))["removed"]
+                        removed = True
+                        assert json.loads(cli("sandbox-list"))["sandboxes"] == []
                     finally:
-                        checked(["docker","rm","-f","-v",container])
+                        if not removed:
+                            checked(["docker","rm","-f","-v",container])
+                    registry_file.write_bytes(original_registry)  # simulate a stale entry
+                    sandbox_state(sandbox["snapshot_id"], "missing", "doctor")
             if options.disk_full:
                 assert options.engine == "mysql"
                 fault_env = os.environ.copy()
@@ -258,11 +287,28 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
                 assert not list((root / ".dbsnap" / "tmp").iterdir())
                 print("PASS real /dev/full dump-client failure preserves target, metadata and temporary-file cleanup")
             assert "rows: 1 -> 2" in cli("diff", "before", "after")
+            report = json.loads(cli("diff-report", "before", "after", "--fail-on-drop-table"))
+            assert report["removed_table_count"] == 0 and not report["policy"]["violated"]
+            dropped = subprocess.run(
+                [str(binary), "diff-report", "after", "before", "--fail-on-drop-table", "--db", url],
+                cwd=root, capture_output=True, text=True, timeout=120,
+            )
+            assert dropped.returncode == 3, dropped.stderr
+            report = json.loads(dropped.stdout)
+            assert report["removed_table_count"] == 1 and report["policy"]["violated"]
+            assert report["removed_tables"][0].rsplit(".", 1)[-1] == "extra"
             archive = str(root / "before.dbsnap")
             if options.engine == "sqlite":
                 partial = root / "partial.dbsnap"
                 catalog_file = root / ".dbsnap" / "metadata.json"
                 catalog_before = catalog_file.read_bytes()
+                fault_env = dict(os.environ, DBSNAP_FAILPOINT="export_disk_full_before_sync")
+                failed = subprocess.run(
+                    [str(binary), "export", "before", "--output", str(partial), "--db", url],
+                    cwd=root, env=fault_env, capture_output=True, text=True, timeout=120,
+                )
+                assert failed.returncode == 1 and "simulated disk-full" in failed.stderr
+                assert not partial.exists() and catalog_file.read_bytes() == catalog_before
                 interrupted("export_before_payload", "export", "before", "--output", str(partial))
                 assert partial.is_file()
                 assert "payload length mismatch" in cli("import", str(partial), error=True)
@@ -314,9 +360,56 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
                 cli("save", "portable", "--method", "dump")
                 cli("save", "portable-second", "--method", "dump")
                 assert "no archive schema or table row-count differences" in cli("diff","portable","portable-second")
+                assert "requires PostgreSQL clones" in cli("diff-report", "portable", "portable-second", "--fail-on-drop-table", error=True)
                 cli("diff", "before", "portable", error=True)
                 cli("restore", "portable")
                 assert rows() == 2
+                # Hold pg_restore inside an index build, then terminate its
+                # backend to exercise cleanup after a real lost connection.
+                index_name = "net_idx_" + name
+                sql(f"""
+                    CREATE FUNCTION hold_sandbox_restore(x integer) RETURNS integer
+                    LANGUAGE plpgsql IMMUTABLE AS $$
+                    BEGIN
+                        IF left(current_database(), 17) = '__dbsnap_sandbox_' THEN
+                            PERFORM pg_sleep(25);
+                        END IF;
+                        RETURN x;
+                    END $$;
+                    CREATE INDEX {index_name} ON items(hold_sandbox_restore(id));
+                """)
+                cli("save", "network-fault", "--method", "dump")
+                proc = subprocess.Popen([str(binary), "sandbox", "network-fault", "--db", url],
+                                        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                terminated = None
+                try:
+                    for _ in range(20):
+                        active = sql(
+                            "SELECT pid::text || ':' || datname FROM pg_stat_activity "
+                            "WHERE pid <> pg_backend_pid() AND state='active' "
+                            "AND left(datname, 17)='__dbsnap_sandbox_' "
+                            f"AND query LIKE '%CREATE INDEX%{index_name}%'",
+                            admin=True,
+                        )
+                        if active:
+                            pid, terminated = active.split(":", 1)
+                            assert pid.isdecimal()
+                            assert sql(f"SELECT pg_terminate_backend({int(pid)})", admin=True) == "t"
+                            break
+                        if proc.poll() is not None:
+                            break
+                        time.sleep(0.2)
+                    _, error = proc.communicate(timeout=90)
+                    assert terminated and proc.returncode != 0 and "pg_restore into staging failed" in error, error
+                    suffix = terminated.removeprefix("__dbsnap_sandbox_")
+                    assert len(suffix) == 6 and all(c in "0123456789abcdef" for c in suffix)
+                    assert sql(f"SELECT COUNT(*) FROM pg_database WHERE datname='{terminated}'", admin=True) == "0"
+                    assert rows() == 2
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.communicate()
+                    sql("DROP FUNCTION hold_sandbox_restore(integer) CASCADE")
             cli("pin", "before")
             cli("prune", "--keep", "1")
             assert "before" in cli("list")
@@ -351,6 +444,9 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
                     preview = json.loads(session.tool("dbsnap_diff_rows", args))
                     assert preview["added"] == 1 and not preview["row_values_disclosed"]
                     assert json.loads(cli("diff-rows", "before", live["live_snapshot_id"], "--table", "items"))["added"] == 1
+                    scoped = dict(args, columns=["value"], key_min=2, key_max=2, limit=1)
+                    preview = json.loads(session.tool("dbsnap_diff_rows", scoped))
+                    assert preview["added"] == 1 and preview["removed"] == 0 and preview["updated"] == 0
                 elif options.docker_sandbox:
                     session.tool("dbsnap_diff_rows", {"from": "before", "to": live["live_snapshot_id"],
                                                       "table": "items", "docker_image": image}, error=True)
@@ -369,7 +465,9 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
             session = Mcp(binary, root, url, True)
             try:
                 if options.engine == "mysql" and options.docker_sandbox:
-                    args = {"from": "before", "to": live["live_snapshot_id"], "table": "items", "docker_image": image}
+                    args = {"from": "before", "to": live["live_snapshot_id"], "table": "items",
+                            "docker_image": image, "columns": ["value"], "key_min": 2,
+                            "key_max": 2, "limit": 1}
                     session.tool("dbsnap_diff_rows", args, error=True, approve=False)
                     preview = json.loads(session.tool("dbsnap_diff_rows", args))
                     assert preview["added"] == 1 and not preview["row_values_disclosed"]

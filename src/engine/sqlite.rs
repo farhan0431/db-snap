@@ -31,6 +31,15 @@ impl SqliteEngine {
         left: &SnapshotRecord,
         right: &SnapshotRecord,
     ) -> Result<String> {
+        Ok(self.schema_diff(store, left, right)?.text)
+    }
+
+    pub(crate) fn schema_diff(
+        &self,
+        store: &Storage,
+        left: &SnapshotRecord,
+        right: &SnapshotRecord,
+    ) -> Result<super::SchemaDiff> {
         use std::collections::BTreeMap;
         type SchemaObjects = BTreeMap<(String, String), (String, Option<i64>)>;
         fn inspect(path: &Path) -> Result<SchemaObjects> {
@@ -72,10 +81,16 @@ impl SqliteEngine {
         let result = (|| {
             let a = inspect(&left_path)?;
             let b = inspect(&right_path)?;
+            let mut removed_tables = Vec::new();
             let mut changes = Vec::new();
             for (key, old) in &a {
                 match b.get(key) {
-                    None => changes.push(format!("removed {} {}", key.0, key.1)),
+                    None => {
+                        if key.0 == "table" {
+                            removed_tables.push(key.1.clone());
+                        }
+                        changes.push(format!("removed {} {}", key.0, key.1));
+                    }
                     Some(new) => {
                         if old.0 != new.0 {
                             changes.push(format!("changed schema {} {}", key.0, key.1));
@@ -96,17 +111,15 @@ impl SqliteEngine {
                     changes.push(format!("added {} {}", key.0, key.1));
                 }
             }
-            if changes.is_empty() {
-                Ok(
-                    "no schema or table row-count differences (row contents are not compared)"
-                        .to_string(),
-                )
+            let text = if changes.is_empty() {
+                "no schema or table row-count differences (row contents are not compared)".into()
             } else {
-                Ok(format!(
-                    "{}\n(row contents are not compared)",
-                    changes.join("\n")
-                ))
-            }
+                format!("{}\n(row contents are not compared)", changes.join("\n"))
+            };
+            Ok(super::SchemaDiff {
+                text,
+                removed_tables,
+            })
         })();
         std::fs::remove_file(&left_path).ok();
         std::fs::remove_file(&right_path).ok();

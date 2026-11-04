@@ -257,6 +257,15 @@ impl PostgresEngine {
         left: &SnapshotRecord,
         right: &SnapshotRecord,
     ) -> Result<String> {
+        Ok(self.schema_diff(store, left, right)?.text)
+    }
+
+    pub(crate) fn schema_diff(
+        &self,
+        store: &Storage,
+        left: &SnapshotRecord,
+        right: &SnapshotRecord,
+    ) -> Result<super::SchemaDiff> {
         if left.method == "pg-dump" && right.method == "pg-dump" {
             return super::postgres_archive_diff::compare(store, left, right);
         }
@@ -309,10 +318,16 @@ impl PostgresEngine {
         }
         let a = inspect(self, left)?;
         let b = inspect(self, right)?;
+        let mut removed_tables = Vec::new();
         let mut changes = Vec::new();
         for (key, old) in &a {
             match b.get(key) {
-                None => changes.push(format!("removed {} {}", key.0, key.1)),
+                None => {
+                    if key.0 == "table" {
+                        removed_tables.push(key.1.clone());
+                    }
+                    changes.push(format!("removed {} {}", key.0, key.1));
+                }
                 Some(new) => {
                     if old.0 != new.0 {
                         changes.push(format!("changed schema {} {}", key.0, key.1));
@@ -336,10 +351,13 @@ impl PostgresEngine {
         if changes.is_empty() {
             changes.push("no table/view schema or row-count differences".into());
         }
-        Ok(format!(
-            "{}\n(row contents, indexes, constraints, routines and triggers are not compared)",
-            changes.join("\n")
-        ))
+        Ok(super::SchemaDiff {
+            text: format!(
+                "{}\n(row contents, indexes, constraints, routines and triggers are not compared)",
+                changes.join("\n")
+            ),
+            removed_tables,
+        })
     }
 
     fn use_verified_tls(&self) -> bool {

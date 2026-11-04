@@ -10,6 +10,11 @@ use crate::storage::{SnapshotRecord, Storage};
 use anyhow::Result;
 use std::collections::HashSet;
 
+pub(crate) struct SchemaDiff {
+    pub text: String,
+    pub removed_tables: Vec<String>,
+}
+
 /// How a snapshot is taken. Clone = physical copy (server-side template
 /// cloning on PostgreSQL, delta store on SQLite); Dump = portable logical
 /// dump (`pg_dump -Fc`).

@@ -17,6 +17,9 @@ pub struct RowOptions<'a> {
     pub git: bool,
     pub replay_dumps: bool,
     pub docker_image: Option<&'a str>,
+    pub columns: &'a [String],
+    pub key_min: Option<i64>,
+    pub key_max: Option<i64>,
 }
 
 struct Row {
@@ -75,6 +78,77 @@ impl Inventory {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Dialect {
+    Sqlite,
+    Postgres,
+    Mysql,
+}
+
+impl Dialect {
+    fn ident(self, name: &str) -> String {
+        match self {
+            Self::Mysql => format!("`{}`", name.replace('`', "``")),
+            _ => quote(name),
+        }
+    }
+}
+
+fn select_scope(
+    mut columns: Vec<Column>,
+    options: &RowOptions<'_>,
+    dialect: Dialect,
+) -> Result<(Inventory, String)> {
+    for selected in options.columns {
+        if !columns.iter().any(|column| column.0 == *selected) {
+            bail!("selected column {selected:?} does not exist in both snapshots");
+        }
+    }
+    if !options.columns.is_empty() {
+        columns.retain(|column| column.2 > 0 || options.columns.contains(&column.0));
+    }
+    let inventory = Inventory::new(columns)?;
+    let mut predicates = Vec::new();
+    if options.key_min.is_some() || options.key_max.is_some() {
+        let [index] = inventory.keys.as_slice() else {
+            bail!("key ranges require a single integer primary key");
+        };
+        let (name, kind, _) = &inventory.columns[*index];
+        let kind = kind.to_ascii_lowercase();
+        let base = kind.split(['(', ' ']).next().unwrap_or("");
+        if !matches!(
+            base,
+            "integer"
+                | "int"
+                | "smallint"
+                | "bigint"
+                | "tinyint"
+                | "mediumint"
+                | "int2"
+                | "int4"
+                | "int8"
+        ) {
+            bail!("key ranges require a single integer primary key");
+        }
+        let key = dialect.ident(name);
+        if matches!(dialect, Dialect::Sqlite) {
+            predicates.push(format!("typeof({key}) = 'integer'"));
+        }
+        if let Some(min) = options.key_min {
+            predicates.push(format!("{key} >= {min}"));
+        }
+        if let Some(max) = options.key_max {
+            predicates.push(format!("{key} <= {max}"));
+        }
+    }
+    let condition = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    };
+    Ok((inventory, condition))
+}
+
 struct Staged(std::path::PathBuf);
 impl Drop for Staged {
     fn drop(&mut self) {
@@ -87,9 +161,11 @@ fn quote(value: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
+    for &byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     out
 }
@@ -101,18 +177,36 @@ fn text_or_hex(bytes: &[u8]) -> Value {
     }
 }
 
-fn sqlite_inventory(path: &Path, table: &str, limit: usize, values: bool) -> Result<Inventory> {
+fn sqlite_inventory(
+    path: &Path,
+    table: &str,
+    limit: usize,
+    options: &RowOptions<'_>,
+) -> Result<Inventory> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let identifier = quote(table);
     let mut statement = db.prepare(&format!("PRAGMA table_info({identifier})"))?;
     let columns = statement
         .query_map([], |r| Ok((r.get(1)?, r.get(2)?, r.get(5)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut inventory = Inventory::new(columns)?;
-    let mut select = db.prepare(&format!("SELECT * FROM {identifier} LIMIT {}", limit + 1))?;
-    if select.column_count() != inventory.columns.len() {
+    if db
+        .prepare(&format!("SELECT * FROM {identifier} LIMIT 0"))?
+        .column_count()
+        != columns.len()
+    {
         bail!("generated/hidden columns are not supported by row comparison");
     }
+    let (mut inventory, condition) = select_scope(columns, options, Dialect::Sqlite)?;
+    let fields = inventory
+        .columns
+        .iter()
+        .map(|c| quote(&c.0))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut select = db.prepare(&format!(
+        "SELECT {fields} FROM {identifier}{condition} LIMIT {}",
+        limit + 1
+    ))?;
     let mut rows = select.query([])?;
     while let Some(row) = rows.next()? {
         let mut cells = Vec::with_capacity(inventory.columns.len());
@@ -126,7 +220,7 @@ fn sqlite_inventory(path: &Path, table: &str, limit: usize, values: bool) -> Res
                 ValueRef::Blob(v) => json!({"blob_hex": hex(v)}),
             });
         }
-        inventory.insert(cells, limit, values)?;
+        inventory.insert(cells, limit, options.show_values)?;
     }
     Ok(inventory)
 }
@@ -173,7 +267,7 @@ fn postgres_inventory(
             .iter()
             .map(|row| (row.get(0), row.get(1), row.get(2)))
             .collect();
-        let mut inventory = Inventory::new(columns)?;
+        let (mut inventory, condition) = select_scope(columns, options, Dialect::Postgres)?;
         let cells = inventory
             .columns
             .iter()
@@ -181,7 +275,7 @@ fn postgres_inventory(
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT ARRAY[{cells}] FROM ONLY {}.{} LIMIT {}",
+            "SELECT ARRAY[{cells}] FROM ONLY {}.{}{condition} LIMIT {}",
             quote(schema),
             quote(table),
             limit + 1
@@ -312,8 +406,8 @@ fn mysql_inventory(
             Ok((name, typ, pk))
         })
         .collect::<Result<Vec<_>>>()?;
-        let mut inventory = Inventory::new(columns)?;
-        let ident = |s: &str| format!("`{}`", s.replace('`', "``"));
+        let (mut inventory, condition) = select_scope(columns, options, Dialect::Mysql)?;
+        let ident = |s: &str| Dialect::Mysql.ident(s);
         let fields = inventory
             .columns
             .iter()
@@ -321,7 +415,7 @@ fn mysql_inventory(
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT {fields} FROM {}.{} LIMIT {}",
+            "SELECT {fields} FROM {}.{}{condition} LIMIT {}",
             ident(schema),
             ident(table),
             limit + 1
@@ -413,6 +507,9 @@ pub fn diff_rows_options_with(
     if table.is_empty() || table.contains('\0') {
         bail!("invalid table name");
     }
+    if matches!((options.key_min, options.key_max), (Some(min), Some(max)) if min > max) {
+        bail!("key minimum must be less than or equal to key maximum");
+    }
     let meta = ctx.store.load_metadata()?;
     let left = meta.find(Some(from))?;
     let right = meta.find(Some(to))?;
@@ -428,7 +525,7 @@ pub fn diff_rows_options_with(
                     engine::sqlite::SqliteEngine::new(path.clone())
                         .stage(&ctx.store, &staging_record)?,
                 );
-                sqlite_inventory(&staged.0, table, limit, options.show_values)
+                sqlite_inventory(&staged.0, table, limit, options)
             }
             DbTarget::Postgres(pg) => {
                 postgres_inventory(&ctx.store, pg, record, table, limit, options)
@@ -439,7 +536,13 @@ pub fn diff_rows_options_with(
         }
     };
     let a = inspect(&left).context("reading first snapshot")?;
-    let b = inspect(&right).context("reading second snapshot")?;
+    // Validate a self-comparison once, avoiding a second staging or replay.
+    let second = if left.id == right.id {
+        None
+    } else {
+        Some(inspect(&right).context("reading second snapshot")?)
+    };
+    let b = second.as_ref().unwrap_or(&a);
     if a.columns != b.columns {
         if options.git {
             return Ok(git_schema(
@@ -448,13 +551,18 @@ pub fn diff_rows_options_with(
         }
         bail!("table column layout changed; inspect schema diff before row comparison");
     }
-    let added = b.rows.keys().filter(|k| !a.rows.contains_key(*k)).count();
-    let removed = a.rows.keys().filter(|k| !b.rows.contains_key(*k)).count();
-    let updated = a
-        .rows
-        .iter()
-        .filter(|(k, v)| b.rows.get(*k).is_some_and(|new| new.digest != v.digest))
-        .count();
+    let (added, removed, updated) = if second.is_some() {
+        let added = b.rows.keys().filter(|k| !a.rows.contains_key(*k)).count();
+        let removed = a.rows.keys().filter(|k| !b.rows.contains_key(*k)).count();
+        let updated = a
+            .rows
+            .iter()
+            .filter(|(k, v)| b.rows.get(*k).is_some_and(|new| new.digest != v.digest))
+            .count();
+        (added, removed, updated)
+    } else {
+        (0, 0, 0)
+    };
     if options.git {
         let mut report = format!(
             "--- {}\n+++ {}\n@@ {} @@\n",
@@ -462,7 +570,7 @@ pub fn diff_rows_options_with(
             right.id,
             json!(table)
         );
-        if options.show_values {
+        if options.show_values && second.is_some() {
             for (key, before) in &a.rows {
                 match b.rows.get(key) {
                     None => git_change(&mut report, &a, Some(before), None),
@@ -474,7 +582,7 @@ pub fn diff_rows_options_with(
             }
             for (key, after) in &b.rows {
                 if !a.rows.contains_key(key) {
-                    git_change(&mut report, &b, None, Some(after));
+                    git_change(&mut report, b, None, Some(after));
                 }
             }
         }

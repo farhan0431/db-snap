@@ -150,7 +150,7 @@ pub fn sandbox_at(
             };
             let engine = engine::postgres::PostgresEngine::new(target.clone());
             let name = engine.create_sandbox(&ctx.store, &record, &meta_ids(&ctx.store)?)?;
-            entries.push(json!({"name":name,"snapshot_id":record.id,"target":target.display()}));
+            entries.push(json!({"engine":"postgres","name":name,"snapshot_id":record.id,"target":target.display()}));
             crate::storage::write_atomic(&registry, &serde_json::to_vec_pretty(&entries)?)
                 .with_context(|| format!("sandbox {name} created but registry save failed; retain its name for manual cleanup"))?;
             return Ok(serde_json::to_string_pretty(
@@ -169,6 +169,7 @@ pub fn sandbox_at(
         } else {
             root.join(output)
         };
+        let mut entries = sandbox_registry(&ctx.store)?;
         let guard = TemporaryFile::create(destination.clone())?;
         match &record.location {
             Location::Manifest { path } => {
@@ -204,11 +205,154 @@ pub fn sandbox_at(
             bail!("sandbox integrity check failed");
         }
         drop(connection);
+        let registered_path = destination.canonicalize()?;
         guard.persist();
+        entries.push(json!({"engine":"sqlite","path":registered_path,"snapshot_id":record.id}));
+        crate::storage::write_atomic(
+            &ctx.store.root.join("sandboxes.json"),
+            &serde_json::to_vec_pretty(&entries)?,
+        )
+        .with_context(|| {
+            format!(
+                "sandbox created at {} but registry save failed",
+                destination.display()
+            )
+        })?;
         Ok(serde_json::to_string_pretty(
             &json!({"operation":"sandbox","snapshot_id":record.id,"database":destination,"source_modified":false,"cleanup":"close sandbox connections, then explicitly delete this file"}),
         )?)
     })())
+}
+
+fn sandbox_registry(store: &Storage) -> Result<Vec<Value>> {
+    match fs::read(store.root.join("sandboxes.json")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).context("reading sandbox registry")?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn sandbox_list_at(root: &Path, explicit: Option<&str>) -> Result<String> {
+    redact((|| {
+        if Storage::find(root).is_none() {
+            bail!("no dbsnap project; run init first");
+        }
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        check_binding(&ctx)?;
+        Ok(serde_json::to_string_pretty(&json!({
+            "operation": "sandbox_list", "sandboxes": sandbox_inventory(&ctx)?
+        }))?)
+    })())
+}
+
+pub fn sandbox_remove_at(root: &Path, explicit: Option<&str>, id: &str) -> Result<String> {
+    redact((|| {
+        if Storage::find(root).is_none() {
+            bail!("no dbsnap project; run init first");
+        }
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        check_binding(&ctx)?;
+        let mut entries = sandbox_registry(&ctx.store)?;
+        let matches: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry["engine"] == "mysql" && entry["container_id"].as_str() == Some(id)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let [index] = matches.as_slice() else {
+            bail!("expected one registered Docker sandbox with the exact full container ID");
+        };
+        engine::mysql_sandbox::remove_owned(&ctx.store, id)?;
+        entries.remove(*index);
+        crate::storage::write_atomic(
+            &ctx.store.root.join("sandboxes.json"),
+            &serde_json::to_vec_pretty(&entries)?,
+        )
+        .context("container removed but sandbox registry update failed")?;
+        Ok(serde_json::to_string_pretty(&json!({
+            "operation": "sandbox_remove", "container_id": id, "removed": true
+        }))?)
+    })())
+}
+
+fn sandbox_inventory(ctx: &Ctx) -> Result<Vec<Value>> {
+    let entries = sandbox_registry(&ctx.store)?;
+    let docker_ids = if entries.iter().any(|entry| entry["engine"] == "mysql") {
+        std::process::Command::new("docker")
+            .args([
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--filter",
+                "label=dbsnap.sandbox=true",
+                "--format",
+                "{{.ID}}",
+            ])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+    } else {
+        None
+    };
+    let state = |exists: Option<bool>| match exists {
+        Some(true) => "present",
+        Some(false) => "missing",
+        None => "unknown",
+    };
+    let mut inventory = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let snapshot = entry["snapshot_id"].as_str();
+        let item = match entry["engine"].as_str() {
+            Some("sqlite") => {
+                let path = entry["path"]
+                    .as_str()
+                    .filter(|p| Path::new(p).is_absolute());
+                let exists = path.and_then(|path| match fs::symlink_metadata(path) {
+                    Ok(info) if info.file_type().is_file() => Some(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+                    _ => None,
+                });
+                json!({"engine":"sqlite","path":path,"snapshot_id":snapshot,"state":state(exists)})
+            }
+            Some("mysql") => {
+                let id = entry["container_id"]
+                    .as_str()
+                    .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()));
+                let exists = id
+                    .zip(docker_ids.as_deref())
+                    .map(|(id, ids)| ids.lines().any(|line| line == id));
+                json!({"engine":"mysql","container_id":id,"snapshot_id":snapshot,"state":state(exists)})
+            }
+            // Legacy PostgreSQL registry entries do not have an engine field.
+            Some("postgres") | None if entry.get("name").is_some() => {
+                let name = entry["name"].as_str().filter(|name| {
+                    name.strip_prefix("__dbsnap_sandbox_")
+                        .is_some_and(|suffix| {
+                            suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+                        })
+                });
+                let exists = match (&ctx.db.target, name) {
+                    (DbTarget::Postgres(target), Some(name))
+                        if entry["target"].as_str() == Some(target.display().as_str()) =>
+                    {
+                        engine::postgres::PostgresEngine::new(target.clone())
+                            .managed_exists(name)
+                            .ok()
+                    }
+                    _ => None,
+                };
+                json!({"engine":"postgres","database":name,"snapshot_id":snapshot,"state":state(exists)})
+            }
+            _ => json!({"snapshot_id":snapshot,"state":"unknown"}),
+        };
+        inventory.push(item);
+    }
+    Ok(inventory)
 }
 
 pub fn doctor_at(root: &Path, explicit: Option<&str>) -> Result<String> {
@@ -266,6 +410,10 @@ pub fn doctor_with(ctx: &Ctx) -> Result<String> {
         }
     }
     untracked.sort();
+    let (sandboxes, sandbox_registry_error) = match sandbox_inventory(ctx) {
+        Ok(entries) => (entries, None),
+        Err(error) => (Vec::new(), Some(util::mask(&format!("{error:#}")))),
+    };
     let connection = match probe {
         Ok(info) => json!({"ok":true,"detail":util::mask(&info.detail)}),
         Err(error) => json!({"ok":false,"error":util::mask(&format!("{error:#}"))}),
@@ -273,7 +421,8 @@ pub fn doctor_with(ctx: &Ctx) -> Result<String> {
     Ok(serde_json::to_string_pretty(
         &json!({"operation":"doctor","connection":connection,
         "engine":ctx.db.engine.to_string(),"snapshot_count":meta.snapshots.len(),"pending_gc_count":meta.pending_gc.len(),"free_bytes":ctx.store.free_bytes().ok(),
-        "pending_recovery":journals,"untracked_files":untracked,"mutations_performed":false,
+        "pending_recovery":journals,"untracked_files":untracked,"sandboxes":sandboxes,
+        "sandbox_registry_error":sandbox_registry_error,"mutations_performed":false,
         "note":"Untracked files are reported, never deleted. CAS garbage and server-side orphans are not scanned. Run verify to check snapshot contents."}),
     )?)
 }

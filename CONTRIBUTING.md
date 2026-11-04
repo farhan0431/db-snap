@@ -4,6 +4,9 @@ Thanks for helping make database time-travel safer for vibe coders. This
 document covers the basics; the architecture lives in
 [docs/DESIGN.md](docs/DESIGN.md).
 
+See the [maintainer roadmap](docs/MAINTAINER-ROADMAP.md) for release
+checklists and proposed features.
+
 ## Development setup
 
 ```bash

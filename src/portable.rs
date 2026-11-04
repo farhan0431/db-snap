@@ -88,6 +88,14 @@ pub fn export_at(root: &Path, db: Option<&str>, selector: &str, output: &Path) -
             std::process::exit(86);
         }
         io::copy(&mut File::open(source)?, &mut archive)?;
+        if std::env::var("DBSNAP_FAILPOINT").as_deref() == Ok("export_disk_full_before_sync") {
+            #[cfg(windows)]
+            let code = 112;
+            #[cfg(not(windows))]
+            let code = 28;
+            return Err(io::Error::from_raw_os_error(code))
+                .context("syncing archive: simulated disk-full error");
+        }
         archive.sync_all()?;
         guard.persist();
         Ok(format!(
