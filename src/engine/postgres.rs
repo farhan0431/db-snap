@@ -122,9 +122,56 @@ impl PostgresEngine {
         Self::db_exists(&mut self.maintenance()?, name)
     }
 
-    pub fn create_sandbox(&self, record: &SnapshotRecord, ids: &HashSet<String>) -> Result<String> {
+    pub(crate) fn create_sandbox(
+        &self,
+        store: &Storage,
+        record: &SnapshotRecord,
+        ids: &HashSet<String>,
+    ) -> Result<String> {
+        let name = format!("{SNAP_PREFIX}sandbox_{}", util::new_id(ids));
+        if record.engine == "postgres" && record.method == "pg-dump" {
+            let archive = store.snapshot_path(record)?;
+            if archive.metadata()?.len() != record.size_bytes
+                || compress::hash_file(&archive)? != record.blake3
+            {
+                bail!("PostgreSQL archive integrity check failed");
+            }
+            let mut admin = self.maintenance()?;
+            Self::require_matching_client(&mut admin, "pg_restore")?;
+            admin.batch_execute(&format!(
+                "CREATE DATABASE {} TEMPLATE template0",
+                Self::quote_ident(&name)
+            ))?;
+            if let Err(error) = self.replay_archive(&archive, &name, true) {
+                if let Err(cleanup) = drop_managed_db(&self.pg, &name) {
+                    bail!("{error:#}; cleanup failed for {name}: {cleanup:#}");
+                }
+                return Err(error);
+            }
+            if std::env::var("DBSNAP_FAILPOINT").as_deref() == Ok("pg_sandbox_after_replay") {
+                eprintln!(
+                    "{}",
+                    util::mask(&format!(
+                        "interrupted sandbox suffix: {}",
+                        &name["__dbsnap_sandbox_".len()..]
+                    ))
+                );
+                std::process::exit(86);
+            }
+            return Ok(name);
+        }
+        let source = Self::clone_name(record)?;
+        self.maintenance()?.batch_execute(&format!(
+            "CREATE DATABASE {} TEMPLATE {}",
+            Self::quote_ident(&name),
+            Self::quote_ident(source)
+        ))?;
+        Ok(name)
+    }
+
+    pub(crate) fn clone_name(record: &SnapshotRecord) -> Result<&str> {
         let Location::PgDatabase { name: source } = &record.location else {
-            bail!("PostgreSQL sandbox requires a clone snapshot; dump sandbox is unsupported");
+            bail!("expected a PostgreSQL clone snapshot");
         };
         if ![
             format!("{SNAP_PREFIX}{}", record.id),
@@ -135,13 +182,71 @@ impl PostgresEngine {
         {
             bail!("invalid source clone");
         }
-        let name = format!("{SNAP_PREFIX}sandbox_{}", util::new_id(ids));
-        self.maintenance()?.batch_execute(&format!(
-            "CREATE DATABASE {} TEMPLATE {}",
-            Self::quote_ident(&name),
-            Self::quote_ident(source)
-        ))?;
-        Ok(name)
+        Ok(source)
+    }
+
+    fn replay_archive(
+        &self,
+        archive: &std::path::Path,
+        database: &str,
+        sandbox: bool,
+    ) -> Result<()> {
+        let mut target = self.pg.clone();
+        target.database = database.into();
+        let engine = Self::new(target);
+        let mut command = Command::new("pg_restore");
+        engine.configure_dump_tls(&mut command);
+        command.args([
+            "-d",
+            &engine.client_connstring(),
+            "--no-owner",
+            "--exit-on-error",
+        ]);
+        if sandbox {
+            command.args(["--no-privileges", "--no-tablespaces"]);
+        }
+        let output = command
+            .arg(archive)
+            .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "pg_restore into staging failed; target was not changed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        engine
+            .connect(database)
+            .context("staged PostgreSQL database verification failed")?;
+        Ok(())
+    }
+
+    pub(crate) fn dump_clone_to(
+        &self,
+        record: &SnapshotRecord,
+        output: &std::path::Path,
+    ) -> Result<()> {
+        let mut target = self.pg.clone();
+        target.database = Self::clone_name(record)?.into();
+        Self::require_matching_client(&mut self.maintenance()?, "pg_dump")?;
+        Self::new(target).dump_to(output)
+    }
+
+    fn dump_to(&self, path: &std::path::Path) -> Result<()> {
+        let mut command = Command::new("pg_dump");
+        self.configure_dump_tls(&mut command);
+        let output = command
+            .args(["-Fc", "-d", &self.client_connstring(), "-f"])
+            .arg(path)
+            .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "pg_dump failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
     }
 
     /// Compare catalogued server-side clones using read-only transactions.
@@ -248,7 +353,7 @@ impl PostgresEngine {
         !loopback || std::env::var("DBSNAP_PG_TLS").as_deref() == Ok("verify-full")
     }
 
-    fn connect(&self, dbname: &str) -> Result<postgres::Client> {
+    pub(crate) fn connect(&self, dbname: &str) -> Result<postgres::Client> {
         let tls = self.use_verified_tls();
         let host = if !tls && self.pg.host.eq_ignore_ascii_case("localhost") {
             "127.0.0.1"
@@ -488,22 +593,7 @@ impl PostgresEngine {
         let size = Self::db_size(&mut admin, &self.pg.database)?;
         let _staged_guard = TemporaryFile::create(staged.clone())?;
 
-        let mut command = Command::new("pg_dump");
-        self.configure_dump_tls(&mut command);
-        let output = command
-            .args(["-Fc", "-d", &self.client_connstring(), "-f"])
-            .arg(&staged)
-            // password travels via env, never argv (§4-T10)
-            .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
-            .env_remove("PGHOSTADDR")
-            .output()?;
-        if !output.status.success() {
-            std::fs::remove_file(&staged).ok();
-            bail!(
-                "pg_dump failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        self.dump_to(&staged)?;
 
         let file_size = std::fs::metadata(&staged)?.len();
         let hash = compress::hash_file(&staged)?;
@@ -737,31 +827,7 @@ impl PostgresEngine {
             ), &[],
         )?;
         let result = (|| -> Result<RestoreOutcome> {
-            let mut staged_target = self.pg.clone();
-            staged_target.database = staging.clone();
-            let staged_engine = Self::new(staged_target);
-            let mut command = Command::new("pg_restore");
-            staged_engine.configure_dump_tls(&mut command);
-            let output = command
-                .args([
-                    "-d",
-                    &staged_engine.client_connstring(),
-                    "--no-owner",
-                    "--exit-on-error",
-                ])
-                .arg(&dump_path)
-                .env("PGPASSWORD", self.pg.password.as_deref().unwrap_or(""))
-                .env_remove("PGHOSTADDR")
-                .output()?;
-            if !output.status.success() {
-                bail!(
-                    "pg_restore into staging failed; target was not changed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
-            staged_engine
-                .connect(&staging)
-                .context("staged PostgreSQL database verification failed")?;
+            self.replay_archive(&dump_path, &staging, false)?;
             self.restore_clone(store, record, &staging, safety_tag)
         })();
         if let Err(error) = admin.execute(

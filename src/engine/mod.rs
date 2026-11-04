@@ -1,6 +1,6 @@
 pub mod mysql;
 mod mysql_diff;
-mod mysql_sandbox;
+pub(crate) mod mysql_sandbox;
 pub mod postgres;
 mod postgres_archive_diff;
 pub mod sqlite;

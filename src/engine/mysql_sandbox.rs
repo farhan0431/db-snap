@@ -6,6 +6,30 @@ use serde_json::json;
 use std::process::{Command, Stdio};
 
 pub(super) fn create(store: &Storage, record: &SnapshotRecord, image: &str) -> Result<String> {
+    let id = start(store, record, image)?;
+    let result = (|| -> Result<()> {
+        let registry = store.root.join("sandboxes.json");
+        let mut entries: Vec<serde_json::Value> = if registry.exists() {
+            serde_json::from_slice(&std::fs::read(&registry)?)?
+        } else {
+            vec![]
+        };
+        entries.push(
+            json!({"engine":"mysql","container_id":id,"snapshot_id":record.id,"image":image}),
+        );
+        crate::storage::write_atomic(&registry, &serde_json::to_vec_pretty(&entries)?)?;
+        Ok(())
+    })();
+    cleanup_on_error(&id, result)?;
+    Ok(serde_json::to_string_pretty(
+        &json!({"operation":"sandbox","engine":"mysql","container_id":id,"image":image,
+        "snapshot_id":record.id,"source_modified":false,"network":"none","published_ports":false,
+        "usage":"use docker exec with the matching mysql/mariadb client inside this container; no host application endpoint is published",
+        "cleanup":format!("docker rm -f -v {id}")}),
+    )?)
+}
+
+pub(crate) fn start(store: &Storage, record: &SnapshotRecord, image: &str) -> Result<String> {
     let (client, admin) = match image {
         "mysql:8.0" => ("mysql", "mysqladmin"),
         "mariadb:11" => ("mariadb", "mariadb-admin"),
@@ -101,31 +125,32 @@ pub(super) fn create(store: &Storage, record: &SnapshotRecord, image: &str) -> R
                 String::from_utf8_lossy(&replay.stderr)
             );
         }
-        let registry = store.root.join("sandboxes.json");
-        let mut entries: Vec<serde_json::Value> = if registry.exists() {
-            serde_json::from_slice(&std::fs::read(&registry)?)?
-        } else {
-            vec![]
-        };
-        entries.push(
-            json!({"engine":"mysql","container_id":id,"snapshot_id":record.id,"image":image}),
-        );
-        crate::storage::write_atomic(&registry, &serde_json::to_vec_pretty(&entries)?)?;
         Ok(())
     })();
-    if let Err(error) = result {
-        let cleanup = Command::new("docker")
-            .args(["rm", "-f", "-v", &id])
-            .output();
-        if !cleanup.is_ok_and(|r| r.status.success()) {
-            bail!("{error:#}; cleanup failed for created sandbox {id}; inspect and explicitly remove that container");
+    cleanup_on_error(&id, result)?;
+    Ok(id)
+}
+
+fn cleanup_on_error(id: &str, result: Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            remove(id)
+                .with_context(|| format!("{error:#}; cleanup failed for created sandbox {id}"))?;
+            Err(error)
         }
-        return Err(error);
     }
-    Ok(serde_json::to_string_pretty(
-        &json!({"operation":"sandbox","engine":"mysql","container_id":id,"image":image,
-        "snapshot_id":record.id,"source_modified":false,"network":"none","published_ports":false,
-        "usage":"use docker exec with the matching mysql/mariadb client inside this container; no host application endpoint is published",
-        "cleanup":format!("docker rm -f -v {id}")}),
-    )?)
+}
+
+pub(crate) fn remove(id: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .args(["rm", "-f", "-v", id])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "could not remove isolated sandbox {id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
 }

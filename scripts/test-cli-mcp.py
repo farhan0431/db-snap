@@ -146,6 +146,13 @@ def main():
         def rows():
             return int(sql("SELECT COUNT(*) FROM items"))
 
+        def interrupted(failpoint, *args):
+            env = dict(os.environ, DBSNAP_FAILPOINT=failpoint)
+            result = subprocess.run([str(binary), *args, "--db", url], cwd=root,
+                                    env=env, capture_output=True, text=True, timeout=120)
+            assert result.returncode == 86, result.stderr
+            return result.stderr.strip()
+
         try:
             checked([str(binary), "--version"])
             checked([str(binary), "--help"])
@@ -251,12 +258,59 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
                 assert not list((root / ".dbsnap" / "tmp").iterdir())
                 print("PASS real /dev/full dump-client failure preserves target, metadata and temporary-file cleanup")
             assert "rows: 1 -> 2" in cli("diff", "before", "after")
+            archive = str(root / "before.dbsnap")
+            if options.engine == "sqlite":
+                partial = root / "partial.dbsnap"
+                catalog_file = root / ".dbsnap" / "metadata.json"
+                catalog_before = catalog_file.read_bytes()
+                interrupted("export_before_payload", "export", "before", "--output", str(partial))
+                assert partial.is_file()
+                assert "payload length mismatch" in cli("import", str(partial), error=True)
+                assert catalog_file.read_bytes() == catalog_before and rows() == 2
+                partial.unlink()
+                cli("export", "before", "--output", str(partial))
+                assert partial.stat().st_size > 0
+            cli("export", "before", "--output", archive)
+            cli("import", archive, "--tag", "imported")
+            assert json.loads(cli("verify", "imported"))["ok"]
+            assert rows() == 2, "import must only register a snapshot"
             catalog = json.loads(cli("list", "--json"))
             assert catalog
             assert json.loads(cli("status", "--json"))["snapshot_count"] >= 2
             assert "before" in cli("list")
             assert "snapshots" in cli("status")
             if options.engine == "postgres":
+                registry_path = root / ".dbsnap" / "sandboxes.json"
+                registry_before = registry_path.read_bytes()
+                marker = interrupted("pg_sandbox_after_replay", "sandbox", "imported")
+                assert marker.startswith("interrupted sandbox suffix: "), marker
+                suffix = marker.removeprefix("interrupted sandbox suffix: ")
+                assert len(suffix) == 6 and all(c in "0123456789abcdef" for c in suffix)
+                orphan = "__dbsnap_sandbox_" + suffix
+                try:
+                    assert registry_path.read_bytes() == registry_before
+                    assert rows() == 2
+                    assert sql("SELECT COUNT(*) FROM items", database_override=orphan) == "1"
+                finally:
+                    sql(f'DROP DATABASE "{orphan}"', admin=True)
+                sandbox = json.loads(cli("sandbox", "imported"))
+                assert sandbox["source_modified"] is False
+                registry = json.loads((root / ".dbsnap" / "sandboxes.json").read_text())
+                fork = registry[-1]["name"]
+                assert fork.startswith("__dbsnap_sandbox_") and fork.replace("_", "").isalnum()
+                try:
+                    assert sql("SELECT COUNT(*) FROM items", database_override=fork) == "1"
+                finally:
+                    sql(f'DROP DATABASE "{fork}"', admin=True)
+                preview = json.loads(cli("diff-rows", "imported", "after", "--table", "items", "--replay-dumps"))
+                assert preview["added"] == 1 and not preview["row_values_disclosed"]
+                replay_session = Mcp(binary, root, url, True)
+                try:
+                    args = {"from": "imported", "to": "after", "table": "items", "replay_dumps": True}
+                    replay_session.tool("dbsnap_diff_rows", args, error=True, approve=False)
+                    assert json.loads(replay_session.tool("dbsnap_diff_rows", args))["added"] == 1
+                finally:
+                    replay_session.close()
                 cli("save", "portable", "--method", "dump")
                 cli("save", "portable-second", "--method", "dump")
                 assert "no archive schema or table row-count differences" in cli("diff","portable","portable-second")
@@ -292,10 +346,14 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
                 session.tool("dbsnap_doctor")
                 live = json.loads(session.tool("dbsnap_diff_live", {"from":"before"}))
                 assert live["live_snapshot_retained"]
-                if options.engine == "sqlite":
-                    preview = json.loads(session.tool("dbsnap_diff_rows", {"from":"before","to":live["live_snapshot_id"],"table":"items"}))
+                if options.engine != "mysql":
+                    args = {"from": "before", "to": live["live_snapshot_id"], "table": "items"}
+                    preview = json.loads(session.tool("dbsnap_diff_rows", args))
                     assert preview["added"] == 1 and not preview["row_values_disclosed"]
-                    assert json.loads(cli("diff-rows","before",live["live_snapshot_id"],"--table","items"))["added"] == 1
+                    assert json.loads(cli("diff-rows", "before", live["live_snapshot_id"], "--table", "items"))["added"] == 1
+                elif options.docker_sandbox:
+                    session.tool("dbsnap_diff_rows", {"from": "before", "to": live["live_snapshot_id"],
+                                                      "table": "items", "docker_image": image}, error=True)
                 session.tool("dbsnap_status")
                 session.tool("dbsnap_list_snapshots")
                 session.tool("dbsnap_create_snapshot", {"tag": "mcp-before"})
@@ -310,6 +368,11 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
 
             session = Mcp(binary, root, url, True)
             try:
+                if options.engine == "mysql" and options.docker_sandbox:
+                    args = {"from": "before", "to": live["live_snapshot_id"], "table": "items", "docker_image": image}
+                    session.tool("dbsnap_diff_rows", args, error=True, approve=False)
+                    preview = json.loads(session.tool("dbsnap_diff_rows", args))
+                    assert preview["added"] == 1 and not preview["row_values_disclosed"]
                 session.tool("dbsnap_restore_snapshot", {"tag_or_id": "mcp-before"}, error=True, approve=False)
                 assert rows() == 3
                 session.tool("dbsnap_restore_snapshot", {"tag_or_id": "mcp-before"})

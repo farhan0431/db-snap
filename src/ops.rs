@@ -9,13 +9,18 @@ use std::path::Path;
 
 #[path = "health.rs"]
 mod health;
+#[path = "portable.rs"]
+mod portable;
 #[path = "rows.rs"]
 mod rows;
 pub use health::{
     diff_live_at, diff_live_with, doctor_at, doctor_with, exec_at, recover_at, recover_with,
     sandbox_at, verify_at, verify_with,
 };
-pub use rows::{diff_rows_at, diff_rows_with};
+pub use portable::{export_at, import_at};
+pub use rows::{
+    diff_rows_at, diff_rows_options_at, diff_rows_options_with, diff_rows_with, RowOptions,
+};
 
 /// Agent-facing skill installed into the project on `dbsnap init` — teaches
 /// AI agents when and how to snapshot/restore.

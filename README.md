@@ -2,26 +2,65 @@
 
 # ⚡ dbsnap
 
-**"git commit / git checkout" for your local database.**
+**Database checkpoints for development and migration rehearsals.**
 
-Snapshots for local development, including schema and data, with a built-in
-**MCP server** for Cursor, Windsurf, Claude Code, and other MCP clients.
+Save schema and data, preview changes between snapshots, and rehearse a
+migration on a separate database. Use the CLI directly or connect the built-in
+MCP server to your coding agent.
 
 [![CI](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml/badge.svg)](https://github.com/farhan0431/db-snap/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/dbsnap.svg)](https://crates.io/crates/dbsnap)
 [![npm](https://img.shields.io/npm/v/%40farhan0431%2Fdb-snap.svg)](https://www.npmjs.com/package/@farhan0431/db-snap)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**SQLite** (delta snapshots, ms) · **PostgreSQL** (server-side clones, s) · **MySQL/MariaDB** (consistent dumps, s)
-
-**MySQL/MariaDB restore is available for the original database.** Stop application writers and scheduled events first. Restore is not atomic; a mandatory pinned safety snapshot and recovery journal provide a recovery path. See [MySQL recovery](docs/MYSQL-RESTORE.md).
+**SQLite** · **PostgreSQL** · **MySQL/MariaDB**
 
 </div>
 
-```bash
-dbsnap save "before-auth-migration"   # keep a restore point
-dbsnap rollback                      # restore the newest snapshot
+```sh
+dbsnap init
+dbsnap save before-migration
+# Run your migration on the development database.
+dbsnap save after-migration
+dbsnap diff before-migration after-migration
 ```
+
+If you need to undo the change, run `dbsnap restore before-migration` after
+checking the target database and the engine's restore requirements.
+
+## What dbsnap does well
+
+- **Save a useful restore point.** Preserve schema and data together. SQLite
+  shares unchanged chunks between snapshots. PostgreSQL offers server-side
+  clones or custom dumps. MySQL/MariaDB uses logical dumps.
+- **Review changes before rollout.** Use `diff` for schema and table counts.
+  In the upcoming v0.4.1, `diff-rows` also compares rows by primary key across
+  engines and can show changed values in a Git-style terminal view.
+- **Rehearse on a copy.** Create a sandbox, point your app and migration runner
+  at it explicitly, then check the result before touching the intended target.
+- **Move a checkpoint.** v0.4.1 adds checksummed export and import. Transfer
+  sanitized fixtures between machines or into a test environment.
+- **Give agents a recovery path.** The built-in MCP server exposes checkpoint,
+  verification, and diff tools. Restore, prune, and trusted dump replay require
+  an authorized session and approval for each call.
+
+## Using dbsnap before a deployment
+
+Run dbsnap in a development or staging database as part of a migration rehearsal
+or a CI job with disposable databases. Save a checkpoint, point the migration
+runner at a sandbox, then verify the migration and review its schema and row
+changes. Use your existing deployment pipeline to apply the reviewed migration.
+
+`dbsnap exec -- <program> <args>` saves a checkpoint before starting your
+migration command. The command inherits its environment, so set the migration
+runner's database URL separately. A failed command leaves the checkpoint
+available for inspection and explicit recovery.
+
+> **Production boundary.** Keep your production backup and recovery plan in
+> your database platform or deployment pipeline. dbsnap targets development
+> workflows. MySQL/MariaDB restores to the original database are non-atomic
+> and require stopped application writers and scheduled events. See the
+> [MySQL recovery guide](docs/MYSQL-RESTORE.md).
 
 ## Install as an MCP server — 30 seconds
 
@@ -59,7 +98,7 @@ Repository verification: [testing guide](docs/TESTING.md),
 The testing guide distinguishes live CLI/MCP coverage, injected failures, and
 remaining limitations; passing tests are not a production-backup certification.
 
-## Why
+## Why a database checkpoint matters
 
 Vibe coding means telling an AI agent things like *"refactor auth, run the
 Prisma migration, reshuffle the seed data"*. Three things go wrong constantly:
@@ -97,10 +136,10 @@ database client libraries required for the core (client tools only for
 | | SQLite | PostgreSQL | MySQL / MariaDB |
 | :--- | :--- | :--- | :--- |
 | Method | delta snapshots (content-addressed chunks) | server-side template clone, or `pg_dump -Fc` | consistent `--single-transaction` dump |
-| Snapshot latency | **< 10 ms** + one pass over the file | ~1 s (block copy) | seconds (dump) |
+| Snapshot cost | Reads database pages and stores changed chunks | Copies a database on the server or writes a dump | Reads and writes a logical dump |
 | Incremental cost | kilobytes (only changed 64 KB chunks) | full copy server-side | full dump |
-| Hot (dev server running) | ✅ | ✅ (brief reconnect blip) | ✅ |
-| Survives container rebuild | ✅ | clone: ❌ · dump: ✅ | ✅ |
+| Snapshot with writers active | SQLite Online Backup API | Clone briefly fences connections. Dump can run online. | Consistent for transactional tables. Avoid concurrent schema changes. |
+| Where to retain snapshots | Keep the project snapshot store on persistent storage. | Clones depend on the server data directory. Keep dumps on persistent storage. | Keep the project snapshot store on persistent storage. |
 | Extra requirements | none | `CREATEDB` privilege; `pg_dump` for dump mode | `mysqldump`/`mariadb-dump` in PATH |
 
 Supported: **SQLite** (delta snapshots), **PostgreSQL** (server-side template
@@ -127,7 +166,10 @@ dbsnap doctor                  # diagnose connection, recovery and untracked fil
 dbsnap recover                 # recover using a server restore journal
 dbsnap exec -- npm run db:migrate # checkpoint before a command; no automatic rollback
 dbsnap diff-live before         # capture/retain live checkpoint and compare
-dbsnap diff-rows before after --table users # bounded SQLite row-change counts
+dbsnap diff-rows before after --table users # bounded primary-key row-change counts
+dbsnap diff-rows before after --table users --format git --show-values
+dbsnap export before --output before.dbsnap
+dbsnap import before.dbsnap --tag transferred
 dbsnap sandbox before --output ./experiment.db # new independent SQLite file
 ```
 
@@ -139,25 +181,63 @@ routines, and triggers are not compared. Individual row contents are not
 compared on any engine. MySQL/MariaDB diff reads verified dumps offline and
 compares table definitions (including inline keys) and row counts. It does not
 execute SQL or compare views, routines, triggers or events. Unsupported INSERT
-formats produce an error; this is not a general SQL dump parser. Source additions
-after v0.3.14 also compare two PostgreSQL dump archives offline using pg_restore:
+formats produce an error. Two PostgreSQL dump archives can also be compared
+offline using `pg_restore` for
 archive-wide schema changes and table COPY row counts, excluding ownership,
 privileges, row contents and sequence values. Mixed clone/archive comparison is
 unsupported. No SQL is replayed into the target.
 When a safety snapshot is enabled, restore stops if it cannot be created.
 
-The new verify/doctor/recover/exec/live-diff/row-preview/sandbox commands are
-available in the current source tree after v0.3.14. See
-[development workflow](docs/DEVELOPMENT-WORKFLOW.md) for exact engine coverage,
-side effects, recovery instructions, limits and the resumable recorded-GC queue.
-Verify does not execute restore. Sandbox supports SQLite files and PostgreSQL
-clones. MySQL/MariaDB requires explicit `sandbox --docker-image mysql:8.0` or
-`mariadb:11` and creates a network-isolated Docker server with no published port.
-PostgreSQL dump sandbox is unsupported. `diff-rows` is SQLite-only and never
-displays row values.
-PostgreSQL dump save and restore require `pg_dump` and `pg_restore` respectively
-to have the same major version as the target server. A mismatch is rejected
-before the database is changed.
+### Portable archives, row previews, and sandboxes
+
+**Availability.** The published v0.4.0 supports SQLite row previews, SQLite and
+PostgreSQL clone sandboxes, and MySQL/MariaDB Docker sandboxes. Portable
+`export/import`, Git output, server row previews, and PostgreSQL dump sandboxes
+are available in the v0.4.1 source on this feature branch.
+
+```sh
+# Export in the source project, then import in the destination project
+dbsnap export before --output before.dbsnap
+dbsnap import before.dbsnap --tag transferred
+dbsnap verify transferred
+
+# Show actual changes in the terminal
+dbsnap diff-rows before after --table users --format git --show-values
+```
+
+| Engine | Archive transfer | Row preview | Sandbox |
+| --- | --- | --- | --- |
+| SQLite | Includes the complete snapshot, even when the original uses delta chunks. | Select one table with a primary key. | `dbsnap sandbox before --output ./experiment.db` creates a new file. |
+| PostgreSQL | Existing custom dumps are packaged. Clone export creates a custom dump with matching `pg_dump` tools. | Clones are read directly. Add `--replay-dumps` for trusted custom dumps. Use `schema.table` outside `public`. | `dbsnap sandbox before` creates a separate database from a clone or trusted dump. Dump replay needs matching `pg_restore`, compatible extensions, and permission to create databases. |
+| MySQL/MariaDB | The destination must use the original database name. | Pass `--docker-image mysql:8.0` or `--docker-image mariadb:11` to replay each trusted dump in a temporary container. | Pass the same image option to create a dedicated container with networking disabled and no published ports. |
+
+- **Treat archives as database copies.** They can contain sensitive application
+  data. Keep them private and import only from trusted sources. Checksums detect
+  corruption. Import creates an unpinned snapshot with a new local ID and leaves
+  the live database untouched. Restoring it is a separate operation.
+- **Keep row values private.** JSON and MCP return counts by default.
+  `--format git --show-values` reveals stored values in terminal output.
+  Comparisons require a primary key and matching layouts. If layouts differ,
+  Git output shows the schema changes and skips the row comparison. The default
+  limit is 10,000 rows per snapshot, configurable up to 100,000, with a 16 MiB
+  encoded value budget per snapshot.
+- **Replay trusted dumps on development systems.** A PostgreSQL sandbox is a
+  separate database on the same server. Functions, extensions, and foreign
+  connections may still reach shared resources. MCP dump replay requires an
+  authorized session and approval for each call. Delete persistent sandboxes
+  explicitly after use. Abrupt termination can leave temporary replay resources
+  behind.
+- **Keep restore safeguards enabled.** `verify` checks artifacts, or clone
+  existence for PostgreSQL. A successful verification does not prove that a
+  restore will succeed. MySQL/MariaDB restore on the original target remains
+  non-atomic and requires stopped writers and scheduled events.
+
+Local CLI/MCP process tests cover these workflows on SQLite, PostgreSQL 17,
+MySQL 8.0, and MariaDB 11. The integration suite also checks corrupt archive
+rejection and SQLite restore after import into a separate project.
+
+See [development workflow](docs/DEVELOPMENT-WORKFLOW.md) for the command
+contract, cleanup, and recovery procedures.
 
 `dbsnap` resolves your database in this order: `--db` flag → `DATABASE_URL`
 from `.env` → common paths (`prisma/dev.db`, `dev.db`, `*.sqlite`, …).
@@ -208,7 +288,7 @@ elicitation. Clients without elicitation support cannot invoke these operations.
 | `dbsnap_verify` | Check artifact integrity or clone existence without replaying SQL. |
 | `dbsnap_doctor` | Diagnose connections, journals, pending GC and untracked files. |
 | `dbsnap_diff_live` | Save and retain a live checkpoint, then compare it with `from`. |
-| `dbsnap_diff_rows` | Bounded SQLite added/removed/updated counts by primary key; no values returned. |
+| `dbsnap_diff_rows` | Bounded added/removed/updated counts by primary key. Trusted dump replay requires explicit options. |
 
 Tool results retain text and add `structuredContent` with `ok`, `message`,
 optional typed `data`, and broad error categories. Creation returns the exact
@@ -314,22 +394,40 @@ machine:
 
 ## Roadmap
 
-- [x] **v0.1.0** — SQLite engine, CLI, MCP server, npm distribution
-- [x] **v0.1.5** — delta snapshots (content-addressed storage, 64 KB page-aligned chunks)
-- [x] **v0.2.0** — PostgreSQL (server-side template cloning + `pg_dump`, fencing & healing)
-- [x] **v0.3.0** — MySQL/MariaDB (consistent dumps, flavor detection, charset preservation)
-- [ ] `dbsnap export/import` — portable snapshot archives across machines
-- [x] snapshot diffing for SQLite, PostgreSQL clones and MySQL/MariaDB table dumps
-- [x] source: PostgreSQL dump schema/count comparison through offline pg_restore
-- [x] source: artifact verification, diagnosis and journal recovery commands
-- [x] source: checkpointed command execution without automatic rollback
-- [x] source: retained live comparison and bounded SQLite primary-key row preview
-- [x] source: SQLite/PostgreSQL clone sandboxes and resumable recorded GC
-- [x] source: explicit network-isolated MySQL/MariaDB Docker sandboxes
-- [ ] server-engine primary-key row previews and PostgreSQL dump sandboxes
+**Released through v0.4.0**
 
-Source additions after v0.3.14 are tracked in
-[priority implementation follow-up](docs/PRIORITY-IMPLEMENTATION.md).
+- [x] SQLite delta snapshots, PostgreSQL clones and dumps, and MySQL/MariaDB dumps
+- [x] CLI and MCP checkpoint, restore, verification, diagnosis, and recovery
+- [x] Schema and row-count diffs, SQLite row previews, and sandbox creation
+- [x] npm distribution with prebuilt binaries and resumable catalog cleanup
+
+**v0.4.1 in development**
+
+- [x] Portable archive export/import, server row previews, and Git-style CLI diff
+- [x] Sandboxes from trusted PostgreSQL custom dumps
+- [ ] Test interrupted archive writes and interrupted PostgreSQL sandbox replay
+- [ ] Validate hosted CI, release builds, and installation from the packed npm package
+
+**Next priorities**
+
+1. **Manage sandboxes.** List registered sandboxes and their source snapshot,
+   show stale entries in `doctor`, and remove a specific sandbox after
+   checking resource ownership.
+2. **Report migration checks in CI.** Add bounded machine-readable reports,
+   with optional failure rules for changes such as dropped tables. Keep
+   rehearsal and rollout as separate steps.
+3. **Make row previews practical on larger tables.** Add primary-key range
+   and column filters. Keep the current preview bounds and privacy defaults.
+4. **Improve transfer and recovery.** Explore opt-in sanitized fixture
+   exports. Expand failure tests for disk, network, and process interruptions.
+
+Start with sandbox listing and stale-resource reporting. Add removal once
+ownership checks and interruption tests cover every supported sandbox type.
+For CI reports, keep the first version focused on explicit policies for schema
+changes and a JSON summary that teams can archive with their migration logs.
+
+See [audit status](docs/AUDIT-STATUS.md) for engine-specific safety gaps and
+[development workflow](docs/DEVELOPMENT-WORKFLOW.md) for current behavior.
 
 ## Repository layout
 

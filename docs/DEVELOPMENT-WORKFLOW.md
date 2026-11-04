@@ -85,19 +85,55 @@ are excluded. Mixed clone/archive diff is unsupported; diff-live captures a
 clone on PostgreSQL, so comparing it to an archive fails but retains the new
 checkpoint. Extraction errors fail explicitly. SQL is never replayed for diff.
 
-Diff-rows is a bounded **SQLite-only** primary-key preview. It returns counts of
-added/removed/updated rows without exposing row values. It requires compatible
-column layouts and explicit non-NULL unique primary keys. Default limit is
-10,000 rows per table per snapshot, maximum 100,000; larger previews fail rather
-than returning partial counts. Memory depends on keys and row sizes, not just
-row count. Generated/hidden column layouts are unsupported. Server-engine row
-diff is not implemented; their existing schema/count diff remains available.
+Diff-rows compares compatible table layouts by explicit primary key. The default
+JSON contains added, removed and updated counts. The limit defaults to 10,000
+rows per snapshot (maximum 100,000). Previews exceeding the limit or the 16 MiB
+encoded-value budget per snapshot fail with an error.
+
+```sh
+dbsnap diff-rows before after --table users --format git --show-values
+dbsnap diff-rows before after --table public.users --replay-dumps
+dbsnap diff-rows before after --table users --docker-image mysql:8.0
+```
+
+Git format uses +/- lines and groups changed columns by primary key. The
+`--show-values` option prints stored values, so keep that output private. When
+column layouts differ, Git format shows the schema changes and skips the row
+comparison. MCP
+returns counts and accepts `replay_dumps` and `docker_image` for trusted dumps
+in an authorized session with per-call approval.
+PostgreSQL reads ordinary tables from clones in read-only transactions and uses
+temporary databases for dump replay. Specify `schema.table` for non-public
+tables. MySQL/MariaDB uses a new network-isolated Docker server for each dump.
+Temporary replay resources are removed on normal completion and errors.
+Interrupted processes can leave managed resources behind. Server values are
+compared using their serialized forms, so a spelling change in a
+case-insensitive key may appear as a removal and an addition.
+
+## Transfer a snapshot
+
+```sh
+dbsnap export before --output before.dbsnap
+dbsnap import before.dbsnap --tag transferred
+dbsnap verify transferred
+```
+
+Run import in the destination project with its own database binding. Import
+registers a new unpinned snapshot with a new local ID. Restore is a separate
+operation with its normal safety checks. The versioned archive verifies both
+metadata and payload and contains snapshot contents. Keep it private and
+accept archives from trusted sources. Hashes detect corruption and provide no
+proof of authorship. Export materializes SQLite delta snapshots and converts
+PostgreSQL clones to custom dumps. PostgreSQL needs matching native client
+tools for clone export and compatible server extensions for replay.
+MySQL/MariaDB destinations must use the original database name because the
+dump contains database-qualified SQL.
 
 ## Sandbox
 
 ```sh
 dbsnap sandbox before --output ./experiment.db  # SQLite
-dbsnap sandbox before                          # PostgreSQL clone snapshot
+dbsnap sandbox before                          # PostgreSQL clone or trusted dump
 dbsnap sandbox before --docker-image mysql:8.0  # MySQL: separate Docker server
 dbsnap sandbox before --docker-image mariadb:11 # MariaDB: separate Docker server
 ```
@@ -108,7 +144,9 @@ project/directory and database URL when running migrations against that file.
 Delete it explicitly after closing sandbox connections when no longer needed.
 
 PostgreSQL creates a separate `__dbsnap_sandbox_*` database from a catalogued
-clone, without fencing or replacing the live target. The result names it; connect
+clone or verified custom dump, without fencing or replacing the live target.
+Dump replay uses template0 and omits archived owners, grants and tablespaces.
+Use trusted dumps and matching PostgreSQL client tools. The result names it; connect
 to it explicitly for experiments. A local `sandboxes.json` registry records its
 source/target. There is no automatic lifetime or cleanup: close clients and
 explicitly drop that managed sandbox after use. A registry write failure can
@@ -132,9 +170,7 @@ created by that call. Successful containers are registered in sandboxes.json
 and require explicit cleanup (`docker rm -f -v ID`). Abrupt process termination
 can leave a container labelled `dbsnap.sandbox=true` for manual inspection.
 
-Same-server MySQL schema rewriting and PostgreSQL dump sandboxes remain
-unsupported. This facility does not automatically configure your application,
-run migrations, or provide a general container security guarantee.
+Point your application at the sandbox explicitly before running migrations.
 
 ## Resumable recorded garbage collection
 

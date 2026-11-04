@@ -21,13 +21,38 @@ fn run(command: Command) -> i32 {
     };
 
     let result = match command {
+        Command::Export {
+            snapshot,
+            output,
+            db,
+        } => ops::export_at(&root, db.as_deref(), &snapshot, &output),
+        Command::Import { archive, tag, db } => {
+            ops::import_at(&root, db.as_deref(), &archive, tag.as_deref())
+        }
         Command::DiffRows {
             from,
             to,
             table,
             limit,
+            format,
+            show_values,
+            replay_dumps,
+            docker_image,
             db,
-        } => ops::diff_rows_at(&root, db.as_deref(), &from, &to, &table, limit),
+        } => ops::diff_rows_options_at(
+            &root,
+            db.as_deref(),
+            &from,
+            &to,
+            &table,
+            limit,
+            &ops::RowOptions {
+                show_values,
+                git: format == "git",
+                replay_dumps,
+                docker_image: docker_image.as_deref(),
+            },
+        ),
         Command::DiffLive { tag_or_id, db } => ops::diff_live_at(&root, db.as_deref(), &tag_or_id),
         Command::Sandbox {
             tag_or_id,

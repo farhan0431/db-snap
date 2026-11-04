@@ -15,7 +15,23 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Bounded SQLite row-change counts by primary key, without printing row values
+    /// Write a portable snapshot archive to a new file
+    Export {
+        snapshot: String,
+        #[arg(long)]
+        output: std::path::PathBuf,
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Verify and register a trusted portable archive in the bound catalog
+    Import {
+        archive: std::path::PathBuf,
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Compare snapshot rows by primary key
     DiffRows {
         from: String,
         to: String,
@@ -23,6 +39,17 @@ pub enum Command {
         table: String,
         #[arg(long, default_value_t = 10000)]
         limit: usize,
+        #[arg(long, default_value = "json", value_parser = ["json", "git"])]
+        format: String,
+        /// Include stored row values in the Git-style terminal preview
+        #[arg(long)]
+        show_values: bool,
+        /// Replay trusted PostgreSQL dumps into temporary sandbox databases
+        #[arg(long)]
+        replay_dumps: bool,
+        /// Replay trusted MySQL/MariaDB dumps in network-isolated containers
+        #[arg(long, value_parser = ["mysql:8.0", "mariadb:11"])]
+        docker_image: Option<String>,
         #[arg(long)]
         db: Option<String>,
     },

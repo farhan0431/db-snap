@@ -7,6 +7,10 @@ pub fn handle(ctx: &Ctx, msg: &Value) -> Option<Value> {
     handle_with_policy(ctx, msg, false)
 }
 
+pub(super) fn row_diff_replays(args: &Value) -> bool {
+    args["replay_dumps"] == true || args.get("docker_image").is_some()
+}
+
 pub fn handle_with_policy(ctx: &Ctx, msg: &Value, allow_destructive: bool) -> Option<Value> {
     let method = msg.get("method")?.as_str()?;
     let id = msg.get("id").cloned();
@@ -22,7 +26,7 @@ pub fn handle_with_policy(ctx: &Ctx, msg: &Value, allow_destructive: bool) -> Op
             "protocolVersion": negotiated_version(msg),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "dbsnap", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "dbsnap provides checkpoints for local development databases. Check dbsnap_status, save before risky changes, and retain the exact snapshot_id from structuredContent.data. Verify checks artifact integrity/existence, not restore success. Doctor diagnoses journals and untracked files without applying recovery. Live diff creates a retained checkpoint; row preview is SQLite-only. Restore/prune require authorized destructive sessions and per-call elicitation. Stop MySQL writers/events first, and preserve recovery journals and pinned snapshots on failure."
+            "instructions": "dbsnap provides checkpoints for local development databases. Check dbsnap_status, save before risky changes, and retain the exact snapshot_id from structuredContent.data. Verify checks artifact integrity/existence, not restore success. Doctor diagnoses journals and untracked files without applying recovery. Live diff creates a retained checkpoint; row preview returns counts, with explicit opt-in for trusted dump replay. Restore/prune require authorized destructive sessions and per-call elicitation. Stop MySQL writers/events first, and preserve recovery journals and pinned snapshots on failure."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": schema::tools() })),
@@ -119,7 +123,37 @@ fn tools_call(
                     None => return Ok(error_result("limit must be an integer")),
                 },
             };
-            ops::diff_rows_with(ctx, from, to, table, limit)
+            let replay_dumps = match args.get("replay_dumps") {
+                None => false,
+                Some(value) => match value.as_bool() {
+                    Some(value) => value,
+                    None => return Ok(error_result("replay_dumps must be a boolean")),
+                },
+            };
+            let docker_image = match args.get("docker_image") {
+                None => None,
+                Some(value) => match value.as_str() {
+                    Some(image @ ("mysql:8.0" | "mariadb:11")) => Some(image),
+                    _ => return Ok(error_result("docker_image must be mysql:8.0 or mariadb:11")),
+                },
+            };
+            if row_diff_replays(&args) && !allow_destructive {
+                return Ok(error_result(
+                    "dump replay requires an authorized MCP session and per-call approval",
+                ));
+            }
+            ops::diff_rows_options_with(
+                ctx,
+                from,
+                to,
+                table,
+                limit,
+                &ops::RowOptions {
+                    replay_dumps,
+                    docker_image,
+                    ..Default::default()
+                },
+            )
         }
         "dbsnap_diff_live" => {
             let Some(from) = args["from"].as_str() else {

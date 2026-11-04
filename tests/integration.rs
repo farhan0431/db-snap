@@ -24,6 +24,32 @@ fn bounded_rows_detect_updates_without_disclosing_values() -> Result<()> {
     assert_eq!(parsed["updated"], 1);
     assert!(!report.contains("private-new-value"));
     assert!(!report.contains("secret"));
+    let preview = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .args([
+            "diff-rows",
+            "before",
+            "after",
+            "--table",
+            "users",
+            "--format",
+            "git",
+            "--show-values",
+            "--db",
+            db.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(preview.status.success(), "{:?}", preview.stderr);
+    let preview = String::from_utf8(preview.stdout)?;
+    assert!(
+        preview.contains("+ \"name\": \"private-new-value\""),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("+1 added")
+            && preview.contains("-1 removed")
+            && preview.contains("~1 changed")
+    );
     assert!(ops::diff_rows_at(&root, db.to_str(), "before", "after", "users", 1).is_err());
     assert!(ops::diff_rows_at(
         &root,
@@ -35,6 +61,60 @@ fn bounded_rows_detect_updates_without_disclosing_values() -> Result<()> {
     )
     .is_err());
     assert_eq!(count_rows(&db), 2);
+    Connection::open(&db)?.execute_batch("ALTER TABLE users ADD COLUMN flags INT")?;
+    save(&root, &db, "schema-change")?;
+    let schema = ops::diff_rows_options_at(
+        &root,
+        db.to_str(),
+        "after",
+        "schema-change",
+        "users",
+        10,
+        &ops::RowOptions {
+            git: true,
+            ..Default::default()
+        },
+    )?;
+    assert!(schema.contains("+ \"flags\" \"INT\""), "{schema}");
+    assert!(ops::diff_rows_at(&root, db.to_str(), "after", "schema-change", "users", 10).is_err());
+    Ok(())
+}
+
+#[test]
+fn portable_sqlite_import_verifies_and_restores_in_another_project() -> Result<()> {
+    let source = temp_root();
+    let source_db = source.join("source.db");
+    create_db(&source_db, 3);
+    init(&source, &source_db)?;
+    save(&source, &source_db, "portable")?;
+    let archive = source.join("snapshot.dbsnap");
+    ops::export_at(&source, source_db.to_str(), "portable", &archive)?;
+    assert!(ops::export_at(&source, source_db.to_str(), "portable", &archive).is_err());
+
+    let target = temp_root();
+    let target_db = target.join("target.db");
+    create_db(&target_db, 1);
+    init(&target, &target_db)?;
+    let corrupt = source.join("corrupt.dbsnap");
+    let mut data = fs::read(&archive)?;
+    *data.last_mut().unwrap() ^= 1;
+    fs::write(&corrupt, &data)?;
+    let store = dbsnap::storage::Storage::find(&target).unwrap();
+    assert!(ops::import_at(&target, target_db.to_str(), &corrupt, None).is_err());
+    assert!(store.load_metadata()?.snapshots.is_empty());
+    assert_eq!(fs::read_dir(store.snapshots_dir())?.count(), 0);
+    ops::import_at(&target, target_db.to_str(), &archive, Some("moved"))?;
+    assert_eq!(count_rows(&target_db), 1);
+    ops::verify_at(&target, target_db.to_str(), Some("moved"))?;
+    ops::restore_at(
+        &target,
+        target_db.to_str(),
+        Some("moved".into()),
+        true,
+        false,
+        false,
+    )?;
+    assert_eq!(count_rows(&target_db), 3);
     Ok(())
 }
 

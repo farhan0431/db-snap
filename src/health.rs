@@ -4,7 +4,7 @@ use crate::storage::{compress, Location, TemporaryFile};
 use anyhow::Context;
 use serde_json::{json, Value};
 
-fn check_binding(ctx: &Ctx) -> Result<()> {
+pub(super) fn check_binding(ctx: &Ctx) -> Result<()> {
     let fingerprint = ctx.db.fingerprint();
     if ctx.store.load_config()? != fingerprint {
         bail!("project binding changed");
@@ -149,7 +149,7 @@ pub fn sandbox_at(
                 vec![]
             };
             let engine = engine::postgres::PostgresEngine::new(target.clone());
-            let name = engine.create_sandbox(&record, &meta_ids(&ctx.store)?)?;
+            let name = engine.create_sandbox(&ctx.store, &record, &meta_ids(&ctx.store)?)?;
             entries.push(json!({"name":name,"snapshot_id":record.id,"target":target.display()}));
             crate::storage::write_atomic(&registry, &serde_json::to_vec_pretty(&entries)?)
                 .with_context(|| format!("sandbox {name} created but registry save failed; retain its name for manual cleanup"))?;

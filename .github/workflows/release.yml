@@ -1,14 +1,15 @@
 name: Release
 
-# Build six binaries, publish one npm package, and create a GitHub Release.
-# Required secret: NPM_TOKEN with publish access to @farhan0431/db-snap.
+# Validate all six binaries on the v0.4.1 feature branch. Version tags also
+# create a GitHub Release and publish using NPM_TOKEN.
 
 on:
   push:
+    branches: ["feature/snapshot-portability-and-diff"]
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -91,6 +92,8 @@ jobs:
   release-meta:
     needs: build-platform
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -118,13 +121,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dbsnap-package"
           npm pack ./npm --pack-destination "$RUNNER_TEMP/dbsnap-package"
           npm install --prefix "$RUNNER_TEMP/dbsnap-package/install" "$RUNNER_TEMP"/dbsnap-package/*.tgz
-          "$RUNNER_TEMP/dbsnap-package/install/node_modules/.bin/dbsnap" --version
+          VERSION="$(node -p 'require("./npm/package.json").version')"
+          BIN="$RUNNER_TEMP/dbsnap-package/install/node_modules/.bin/dbsnap"
+          test "$("$BIN" --version)" = "dbsnap $VERSION"
+          python3 scripts/test-cli-mcp.py --engine sqlite --binary "$BIN"
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: zips/*.zip
           generate_release_notes: true
       - name: Verify and publish npm package
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |

@@ -24,9 +24,14 @@ pub struct TemporaryFile {
 
 impl TemporaryFile {
     pub fn create(path: PathBuf) -> Result<Self> {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
             .open(&path)
             .with_context(|| format!("creating temporary file {}", path.display()))?;
         Ok(Self { path, armed: true })

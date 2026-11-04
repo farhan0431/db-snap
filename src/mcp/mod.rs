@@ -52,7 +52,9 @@ pub fn run(explicit_db: Option<&str>, allow_destructive: bool) -> Result<()> {
                 let name = msg["params"]["name"].as_str().unwrap_or("");
                 let destructive = msg["method"] == "tools/call"
                     && msg.get("id").is_some()
-                    && matches!(name, "dbsnap_restore_snapshot" | "dbsnap_prune");
+                    && (matches!(name, "dbsnap_restore_snapshot" | "dbsnap_prune")
+                        || (name == "dbsnap_diff_rows"
+                            && handler::row_diff_replays(&msg["params"]["arguments"])));
                 if destructive && allow_destructive {
                     let request_id = msg["id"].clone();
                     let preparation = if name == "dbsnap_restore_snapshot" {
@@ -68,6 +70,8 @@ pub fn run(explicit_db: Option<&str>, allow_destructive: bool) -> Result<()> {
                             msg["params"]["arguments"]["tag_or_id"] = json!(id);
                             format!("Restore database {} to snapshot {}? Current data will be replaced.", ctx.db.display(), id)
                         })
+                    } else if name == "dbsnap_diff_rows" {
+                        Ok(format!("Replay trusted snapshot SQL into temporary sandboxes for a row preview of {}?", ctx.db.display()))
                     } else {
                         let keep = msg["params"]["arguments"]["keep"]
                             .as_u64()

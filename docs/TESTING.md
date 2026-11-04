@@ -147,3 +147,19 @@ that source rows are unchanged, and explicitly remove that exact container.
 failed-replay cleanup regression. Run it separately from other sandbox tests:
 it compares the labelled container inventory before and after the operation.
 The command creates Docker resources only when the image option is explicit.
+
+## v0.4.1 release validation
+
+The release workflow also runs on `feature/snapshot-portability-and-diff`
+for pre-release verification. It runs CI, builds six target binaries, packs
+and installs the npm tarball, verifies the installed version, and runs the
+SQLite CLI/MCP process suite against the installed launcher. Publication
+requires a version tag.
+
+The process suite interrupts export after writing the archive header. Import
+must reject the partial archive and preserve the catalog and live data. The
+PostgreSQL suite exits after dump replay and before sandbox registration. It
+checks the source rows and registry, verifies the isolated copy, and drops
+only the sandbox named by that test process. A real interruption can leave
+an incomplete export file or an unregistered sandbox. Inspect the resource
+before removing it and retry the command after cleanup.
