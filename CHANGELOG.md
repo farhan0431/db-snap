@@ -5,6 +5,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-11-04
+
+### Fixed
+- Bind `init` to its current directory so a nested project can use its own
+  database and snapshot catalog.
+- Search common Homebrew client directories when the MCP process has a
+  limited PATH. Use the same PostgreSQL client for version checking and
+  execution.
+- Let `diff-rows --show-values` select Git-style output when no format is
+  specified. An explicit JSON format still rejects row values.
+
+## [0.4.1] — 2026-11-04
+
+### Added
+- Verified portable snapshot archives with `export` and `import`.
+- Primary-key row previews across engines, Git-style CLI output, column
+  selection, and integer key ranges.
+- PostgreSQL dump sandboxes, sandbox inventory and diagnostics, and removal
+  of Docker sandboxes after verifying project ownership.
+- Bounded JSON migration reports with an optional table-drop policy.
+
+### Changed
+- Prepare a snapshot only once for a row self-comparison.
+
+## [0.4.0] — 2026-11-04
+
+### Added
+- `verify`, `doctor`, and journal-based `recover`.
+- Checkpointed command execution, live comparison, and SQLite row previews.
+- Offline PostgreSQL archive comparison and sandbox workflows for all engines.
+- Structured results and additional diagnostics and comparison tools in MCP.
+
+### Changed
+- Retry cleanup of artifacts from snapshots already retired from the catalog.
+
+## [0.3.14] — 2026-11-03
+
+See the [0.3.x release history](https://github.com/farhan0431/db-snap/compare/v0.3.0...v0.3.14)
+for scoped npm packaging, restore safety and recovery, and snapshot diff.
+
+## [0.3.0] — 2026-11-03
+
 ### Added
 - Agent/repo discoverability for MCP installation: `llms.txt` (LLM-readable
   install summary), `AGENTS.md` (conventions for agents working on the
@@ -12,9 +54,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Windsurf, Claude Desktop, and generic clients), and a top-of-README
   install block.
 
-## [0.3.0] — 2026-11-03
-
-### Added
 - **MySQL/MariaDB engine** — consistent logical snapshots via
   `mysqldump --single-transaction` (InnoDB-safe, no writer locks), piped
   through zstd with blake3 integrity hashing.

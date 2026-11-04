@@ -22,6 +22,10 @@ Requires Node.js 16 or later.
 Portable archives, server row previews, Git output, and PostgreSQL dump
 sandboxes require dbsnap v0.4.1 or later.
 
+v0.4.2 binds `init` to the current directory, finds native clients in common
+Homebrew locations, and lets `diff-rows --show-values` select Git-style output
+when no format is given.
+
 ```bash
 npm install -g @farhan0431/db-snap
 dbsnap --version

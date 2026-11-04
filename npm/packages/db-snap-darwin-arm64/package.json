@@ -1,6 +1,6 @@
 {
   "name": "db-snap-darwin-arm64",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "dbsnap binary for macOS Apple Silicon (darwin-arm64)",
   "license": "MIT",
   "os": [

@@ -310,6 +310,10 @@ contract, cleanup, and recovery procedures.
 `dbsnap` resolves your database in this order: `--db` flag → `DATABASE_URL`
 from `.env` → common paths (`prisma/dev.db`, `dev.db`, `*.sqlite`, …).
 
+With dbsnap v0.4.2 or later, run `dbsnap init` from the directory you want to bind.
+In a monorepo, this lets each subproject have its own catalog. After init,
+commands run from subdirectories still find the nearest initialized project.
+
 Snapshots live in `.dbsnap/` (auto-added to `.gitignore`):
 
 ```text
@@ -479,6 +483,22 @@ steps. For two different snapshots, both still need preparation. MySQL
 times include Docker startup, dump replay, and cleanup. Filters reduce
 row work while dump replay still runs. See the [benchmark method and
 reproduction steps](docs/TESTING.md#row-preview-benchmark).
+
+### macOS benchmark with two different snapshots
+
+A user tested dbsnap v0.4.1 on an **iMac M4 with 16 GB RAM**. The times below
+are individual wall-clock observations. The diff compares schema and table
+row counts across two snapshots after a change.
+
+| Engine and baseline fixture | Save | Diff | Rollback |
+| --- | ---: | ---: | ---: |
+| PostgreSQL 16.15 clone in Docker · 176,050 rows | 213 ms | 65 ms | 400 ms |
+| MySQL 9.6.0 local · 102,000 rows | 166 ms | 40 ms | 875 ms |
+| SQLite WAL · 255,010 rows | 200 ms | 97 ms | 276 ms |
+
+MySQL's 40 ms result is the offline schema/count diff. For a comparison
+that reads individual rows, see the Docker row preview benchmark above.
+See [fixture details and evidence limits](docs/TESTING.md#macos-field-benchmark).
 
 ### Snapshot and restore examples
 

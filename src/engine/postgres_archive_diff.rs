@@ -25,7 +25,25 @@ fn extract(
         util::new_id(&store.load_metadata()?.ids())
     ));
     let guard = TemporaryFile::create(path.clone())?;
-    let output = Command::new("pg_restore")
+    let reader = super::client_tools::candidates(
+        "pg_restore",
+        &[
+            "libpq",
+            "postgresql",
+            "libpq@18",
+            "postgresql@18",
+            "libpq@17",
+            "postgresql@17",
+            "libpq@16",
+            "postgresql@16",
+            "postgresql@15",
+            "postgresql@14",
+        ],
+    )
+    .into_iter()
+    .next()
+    .context("pg_restore is required to inspect custom archives offline")?;
+    let output = Command::new(reader)
         .args([mode, "--no-owner", "--no-privileges", "--file=-"])
         .arg(source)
         .stdout(std::fs::OpenOptions::new().write(true).open(&path)?)

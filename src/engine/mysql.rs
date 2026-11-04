@@ -127,39 +127,57 @@ impl MysqlEngine {
         ]
     }
 
-    fn run_client(&self, bin: &str, args: &[String]) -> Result<std::process::Output> {
+    fn run_client(&self, bin: &std::path::Path, args: &[String]) -> Result<std::process::Output> {
         Command::new(bin)
             .arg("--no-defaults")
             .args(args)
             .env("MYSQL_PWD", self.target.password.as_deref().unwrap_or(""))
             .output()
-            .with_context(|| format!("spawning {bin}"))
+            .with_context(|| format!("spawning {}", bin.display()))
     }
 
     /// Resolve a client binary, honoring the detected flavor with a
     /// cross-flavor fallback (mariadb-dump ↔ mysqldump, §2.3).
-    fn pick_bin(&self, flavor: Flavor, dump: bool) -> Result<String> {
+    fn pick_bin(&self, flavor: Flavor, dump: bool) -> Result<std::path::PathBuf> {
         let (primary, fallback) = match (flavor, dump) {
             (Flavor::Maria, true) => ("mariadb-dump", "mysqldump"),
             (Flavor::Maria, false) => ("mariadb", "mysql"),
             (Flavor::Mysql, true) => ("mysqldump", "mariadb-dump"),
             (Flavor::Mysql, false) => ("mysql", "mariadb"),
         };
+        let packages = match flavor {
+            Flavor::Mysql => [
+                "mysql-client",
+                "mysql-client@8.4",
+                "mysql-client@8.0",
+                "mysql",
+                "mariadb",
+            ],
+            Flavor::Maria => [
+                "mariadb",
+                "mariadb@11.4",
+                "mysql-client",
+                "mysql-client@8.0",
+                "mysql",
+            ],
+        };
         for bin in [primary, fallback] {
-            let probe = self.run_client(bin, &["--version".to_string()]);
-            if probe.map(|o| o.status.success()).unwrap_or(false) {
-                return Ok(bin.to_string());
+            for path in super::client_tools::candidates(bin, &packages) {
+                let probe = self.run_client(&path, &["--version".to_string()]);
+                if probe.is_ok_and(|output| output.status.success()) {
+                    return Ok(path);
+                }
             }
         }
         bail!(
-            "neither {primary} nor {fallback} found in PATH — install the {} client tools",
+            "neither {primary} nor {fallback} found in PATH or supported client directories — install the {} client tools",
             flavor.name()
         )
     }
 
     /// Run one SQL statement via the `mysql` client in batch mode; returns
     /// raw stdout (tab-separated, no headers).
-    fn sql(&self, bin: &str, query: &str) -> Result<String> {
+    fn sql(&self, bin: &std::path::Path, query: &str) -> Result<String> {
         let mut args = self.base_args();
         args.push("-N".into()); // no column names
         args.push("-B".into()); // batch (tab-separated)
@@ -169,14 +187,14 @@ impl MysqlEngine {
         if !output.status.success() {
             bail!(
                 "SQL failed ({}): {}",
-                bin,
+                bin.display(),
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    fn detect_flavor(&self, exec_bin: &str) -> Result<(Flavor, String)> {
+    fn detect_flavor(&self, exec_bin: &std::path::Path) -> Result<(Flavor, String)> {
         let out = self.sql(exec_bin, "SELECT VERSION();")?;
         let version = out.lines().next().unwrap_or("").trim().to_string();
         if version.is_empty() {
@@ -287,7 +305,7 @@ impl MysqlEngine {
                 .arg(&raw_tmp)
                 .stderr(Stdio::piped())
                 .output()
-                .with_context(|| format!("spawning {dump_bin}"));
+                .with_context(|| format!("spawning {}", dump_bin.display()));
 
             match output {
                 Ok(o)
@@ -330,7 +348,7 @@ impl MysqlEngine {
         }
         bail!(
             "{} failed with every known flag set for {} {}:\n{}",
-            dump_bin,
+            dump_bin.display(),
             flavor.name(),
             version,
             errors.join("\n")
@@ -515,7 +533,7 @@ impl MysqlEngine {
 
     /// Enumerate only objects belonging to the bound target. The database
     /// itself (and its grants/default charset) is never dropped.
-    fn cleanup_sql(&self, bin: &str) -> Result<String> {
+    fn cleanup_sql(&self, bin: &std::path::Path) -> Result<String> {
         let db = Self::quote_lit(&self.target.database);
         self.require_quiet_target(bin)?;
         let exists = self.sql(
@@ -561,7 +579,7 @@ impl MysqlEngine {
         Ok(sql)
     }
 
-    fn require_quiet_target(&self, bin: &str) -> Result<()> {
+    fn require_quiet_target(&self, bin: &std::path::Path) -> Result<()> {
         let db = Self::quote_lit(&self.target.database);
         let sessions = self.sql(bin, &format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB={db} AND ID<>CONNECTION_ID()"))?;
         if sessions.trim() != "0" {

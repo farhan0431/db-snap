@@ -109,6 +109,11 @@ dbsnap prune --keep 5
   project, or set `DATABASE_URL` in `.env`.
 - **"this project is bound to …"** — the project is already bound to
   another database; run `dbsnap status` in the right directory.
+- **Native database client missing from a GUI/MCP session** — install the
+  required native client first. For PostgreSQL, match its major version to
+  the server. dbsnap v0.4.2 and later search common Homebrew client
+  directories after PATH. On v0.4.1, add the appropriate client binary
+  directory to the MCP server's `env.PATH` and restart the session.
 - **Windows says the binary is blocked** — the binaries are signed-zip-free
   but not Authenticode-signed; unblock via file Properties if SmartScreen
   complains.

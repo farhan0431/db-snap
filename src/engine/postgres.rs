@@ -80,28 +80,50 @@ impl PostgresEngine {
         })
     }
 
-    fn require_matching_client(admin: &mut postgres::Client, bin: &str) -> Result<()> {
-        let output = Command::new(bin)
-            .arg("--version")
-            .output()
-            .with_context(|| {
-                format!("{bin} not found in PATH — install matching PostgreSQL client tools")
-            })?;
-        if !output.status.success() {
-            bail!("could not determine {bin} version");
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let client = Self::client_major(&text)
-            .ok_or_else(|| anyhow::anyhow!("could not parse {bin} version: {text}"))?;
+    fn require_matching_client(
+        admin: &mut postgres::Client,
+        bin: &str,
+    ) -> Result<std::path::PathBuf> {
         let number: String = admin.query_one("SHOW server_version_num", &[])?.get(0);
         let numeric: u32 = number
             .parse()
             .context("invalid PostgreSQL server_version_num")?;
         let server = numeric / 10000;
-        if client != server {
-            bail!("{bin} major version {client} does not match PostgreSQL server major version {server}; install matching client tools and retry before restoring or saving a dump");
+        let libpq = format!("libpq@{server}");
+        let postgres = format!("postgresql@{server}");
+        let candidates =
+            super::client_tools::candidates(bin, &[&libpq, &postgres, "libpq", "postgresql"]);
+        #[cfg(target_os = "linux")]
+        let candidates = {
+            let mut paths = candidates;
+            let path =
+                std::path::PathBuf::from(format!("/usr/lib/postgresql/{server}/bin")).join(bin);
+            if path.is_file() && !paths.contains(&path) {
+                paths.push(path);
+            }
+            paths
+        };
+        let mut mismatch = None;
+        for path in candidates {
+            let Ok(output) = Command::new(&path).arg("--version").output() else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&output.stdout);
+            match Self::client_major(&text) {
+                Some(client) if client == server => return Ok(path),
+                Some(client) => {
+                    mismatch.get_or_insert(client);
+                }
+                None => {}
+            }
         }
-        Ok(())
+        if let Some(client) = mismatch {
+            bail!("{bin} major version {client} does not match PostgreSQL server major version {server}; install matching client tools");
+        }
+        bail!("{bin} for PostgreSQL {server} not found in PATH or supported client directories; install matching PostgreSQL client tools");
     }
     pub fn new(pg: ServerTarget) -> Self {
         Self { pg }
@@ -137,12 +159,12 @@ impl PostgresEngine {
                 bail!("PostgreSQL archive integrity check failed");
             }
             let mut admin = self.maintenance()?;
-            Self::require_matching_client(&mut admin, "pg_restore")?;
+            let restore_bin = Self::require_matching_client(&mut admin, "pg_restore")?;
             admin.batch_execute(&format!(
                 "CREATE DATABASE {} TEMPLATE template0",
                 Self::quote_ident(&name)
             ))?;
-            if let Err(error) = self.replay_archive(&archive, &name, true) {
+            if let Err(error) = self.replay_archive(&restore_bin, &archive, &name, true) {
                 if let Err(cleanup) = drop_managed_db(&self.pg, &name) {
                     bail!("{error:#}; cleanup failed for {name}: {cleanup:#}");
                 }
@@ -187,6 +209,7 @@ impl PostgresEngine {
 
     fn replay_archive(
         &self,
+        restore_bin: &std::path::Path,
         archive: &std::path::Path,
         database: &str,
         sandbox: bool,
@@ -194,7 +217,7 @@ impl PostgresEngine {
         let mut target = self.pg.clone();
         target.database = database.into();
         let engine = Self::new(target);
-        let mut command = Command::new("pg_restore");
+        let mut command = Command::new(restore_bin);
         engine.configure_dump_tls(&mut command);
         command.args([
             "-d",
@@ -228,12 +251,12 @@ impl PostgresEngine {
     ) -> Result<()> {
         let mut target = self.pg.clone();
         target.database = Self::clone_name(record)?.into();
-        Self::require_matching_client(&mut self.maintenance()?, "pg_dump")?;
-        Self::new(target).dump_to(output)
+        let dump_bin = Self::require_matching_client(&mut self.maintenance()?, "pg_dump")?;
+        Self::new(target).dump_to(&dump_bin, output)
     }
 
-    fn dump_to(&self, path: &std::path::Path) -> Result<()> {
-        let mut command = Command::new("pg_dump");
+    fn dump_to(&self, dump_bin: &std::path::Path, path: &std::path::Path) -> Result<()> {
+        let mut command = Command::new(dump_bin);
         self.configure_dump_tls(&mut command);
         let output = command
             .args(["-Fc", "-d", &self.client_connstring(), "-f"])
@@ -607,11 +630,11 @@ impl PostgresEngine {
         let out_path = store.snapshots_dir().join(format!("{id}.dump"));
         let staged = store.tmp_dir().join(format!("save-{id}.dump"));
         let mut admin = self.maintenance()?;
-        Self::require_matching_client(&mut admin, "pg_dump")?;
+        let dump_bin = Self::require_matching_client(&mut admin, "pg_dump")?;
         let size = Self::db_size(&mut admin, &self.pg.database)?;
         let _staged_guard = TemporaryFile::create(staged.clone())?;
 
-        self.dump_to(&staged)?;
+        self.dump_to(&dump_bin, &staged)?;
 
         let file_size = std::fs::metadata(&staged)?.len();
         let hash = compress::hash_file(&staged)?;
@@ -808,7 +831,7 @@ impl PostgresEngine {
         }
         let target = &self.pg.database;
         let mut admin = self.maintenance()?;
-        Self::require_matching_client(&mut admin, "pg_restore")?;
+        let restore_bin = Self::require_matching_client(&mut admin, "pg_restore")?;
         Self::heal(&mut admin, target);
 
         let attrs = admin.query_opt(
@@ -845,7 +868,7 @@ impl PostgresEngine {
             ), &[],
         )?;
         let result = (|| -> Result<RestoreOutcome> {
-            self.replay_archive(&dump_path, &staging, false)?;
+            self.replay_archive(&restore_bin, &dump_path, &staging, false)?;
             self.restore_clone(store, record, &staging, safety_tag)
         })();
         if let Err(error) = admin.execute(

@@ -72,8 +72,6 @@ fn bounded_rows_detect_updates_without_disclosing_values() -> Result<()> {
             "after",
             "--table",
             "users",
-            "--format",
-            "git",
             "--show-values",
             "--db",
             db.to_str().unwrap(),
@@ -90,6 +88,25 @@ fn bounded_rows_detect_updates_without_disclosing_values() -> Result<()> {
             && preview.contains("-1 removed")
             && preview.contains("~1 changed")
     );
+    let explicit_json = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .args([
+            "diff-rows",
+            "before",
+            "after",
+            "--table",
+            "users",
+            "--format",
+            "json",
+            "--show-values",
+            "--db",
+            db.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(!explicit_json.status.success());
+    assert!(String::from_utf8_lossy(&explicit_json.stderr)
+        .contains("--show-values requires --format git"));
+    assert!(explicit_json.stdout.is_empty());
     assert!(ops::diff_rows_at(&root, db.to_str(), "before", "after", "users", 1).is_err());
     assert!(ops::diff_rows_at(
         &root,
@@ -439,6 +456,48 @@ fn commands_find_project_database_from_subdirectory() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("SQLite"));
+    Ok(())
+}
+
+#[test]
+fn init_binds_nested_project_without_touching_parent_catalog() -> Result<()> {
+    let root = temp_root();
+    let parent_db = root.join("dev.db");
+    create_db(&parent_db, 2);
+    init(&root, &parent_db)?;
+    save(&root, &parent_db, "parent")?;
+    let parent_config = root.join(".dbsnap/config.json");
+    let parent_metadata = root.join(".dbsnap/metadata.json");
+    let original = (fs::read(&parent_config)?, fs::read(&parent_metadata)?);
+
+    let child = root.join("apps/nested");
+    fs::create_dir_all(&child)?;
+    let child_db = child.join("child.db");
+    create_db(&child_db, 4);
+    fs::write(child.join(".env"), "DATABASE_URL=./child.db\n")?;
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&child)
+        .env_remove("DATABASE_URL")
+        .arg("init")
+        .output()?;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let child_store = dbsnap::storage::Storage::find(&child).unwrap();
+    assert_eq!(child_store.root, child.join(".dbsnap"));
+    assert_ne!(
+        child_store.load_config()?,
+        dbsnap::storage::Storage::find(&root)
+            .unwrap()
+            .load_config()?
+    );
+    save(&child, &child_db, "child")?;
+    assert_eq!(
+        original,
+        (fs::read(parent_config)?, fs::read(parent_metadata)?)
+    );
     Ok(())
 }
 
@@ -1669,7 +1728,7 @@ fn postgres_dump_roundtrip() -> Result<()> {
 }
 
 #[test]
-fn postgres_dump_client_version_mismatch_is_rejected_before_save() -> Result<()> {
+fn postgres_dump_rejects_a_mismatch_when_no_matching_client_is_found() -> Result<()> {
     use std::str::FromStr;
     let Some(url) = pg_setup_test_db("clientversion")? else {
         return Ok(());
@@ -1694,22 +1753,31 @@ fn postgres_dump_client_version_mismatch_is_rejected_before_save() -> Result<()>
         "CREATE TABLE items (id integer); INSERT INTO items VALUES (1);",
     )?;
     init(&root, Path::new(&url))?;
-    let error = ops::save_at(
+    let result = ops::save_at(
         &root,
         Some(&url),
         Some("dump".into()),
         false,
         false,
         SaveMethod::Dump,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("does not match PostgreSQL server"));
+    );
     assert_eq!(pg_count(&url)?, 1);
-    assert!(dbsnap::storage::Storage::find(&root)
+    let snapshots = dbsnap::storage::Storage::find(&root)
         .unwrap()
         .load_metadata()?
-        .snapshots
-        .is_empty());
+        .snapshots;
+    match result {
+        Ok(_) => {
+            // A matching versioned installation can be found after the
+            // mismatched client in PATH.
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].method, "pg-dump");
+        }
+        Err(error) => {
+            assert!(format!("{error:#}").contains("does not match PostgreSQL server"));
+            assert!(snapshots.is_empty());
+        }
+    }
     pg_drop_test_db(&url);
     Ok(())
 }

@@ -63,7 +63,9 @@ fn run(command: Command) -> i32 {
             limit,
             &ops::RowOptions {
                 show_values,
-                git: format == "git",
+                git: format
+                    .as_deref()
+                    .map_or(show_values, |format| format == "git"),
                 replay_dumps,
                 docker_image: docker_image.as_deref(),
                 columns: &columns,

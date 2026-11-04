@@ -199,3 +199,26 @@ To reproduce, run `scripts/bench-row-preview.py --baseline OLD_BINARY
 `mysql` and set the matching disposable loopback test URL for server
 benchmarks. The MySQL benchmark requires Docker and the matching client
 tools. Use `--runs 3` for the slower replay case.
+
+## macOS field benchmark
+
+A user report for dbsnap v0.4.1 on an iMac M4 (16 GB RAM) recorded the
+following wall-clock observations. The report gives individual timings,
+with no repeated timing series. Baseline row counts describe the fixture
+before mutation. PostgreSQL ran in Docker, and MySQL ran locally.
+
+| Fixture | Baseline data | Save | Schema/count diff | Rollback |
+| --- | --- | ---: | ---: | ---: |
+| PostgreSQL 16.15 clone | 176,050 rows across six tables, 30.5 MB | 213 ms | 65 ms | 400 ms |
+| MySQL 9.6.0 dump | 102,000 rows across four tables, 2.7 MB raw SQL dump | 166 ms | 40 ms | 875 ms |
+| SQLite WAL IoT | 255,010 rows across four tables, 14.6 MB | 200 ms | 97 ms | 276 ms |
+
+The schema/count comparisons used different snapshots. After rollback to
+the mutated snapshots, reported counts totaled 171,053 rows in PostgreSQL
+and 101,502 rows in MySQL. SQLite's second fixture recorded a 260 ms save
+and a 445 ms restore of a 34.8 MB database. The supplied logs give no exact
+diff timing for that fixture.
+
+These observations describe the fixtures and machine above. They do not
+measure row-level Docker replay, compare against manual workflows, or set
+performance expectations for other hosts and datasets.

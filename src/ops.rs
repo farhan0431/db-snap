@@ -124,11 +124,16 @@ fn redact(result: Result<String>) -> Result<String> {
 
 pub fn init_at(root: &Path, explicit: Option<&str>, allow_remote: bool) -> Result<String> {
     redact((|| {
-        let existing = Storage::find(root);
-        let project_root = existing
-            .as_ref()
-            .and_then(|s| s.root.parent())
-            .unwrap_or(root);
+        // Only explicit init establishes a new project boundary. Other
+        // commands still discover an existing project from its subfolders.
+        let project_root = root;
+        let path = root.join(crate::storage::DBSNAP_DIR);
+        let existing = match fs::symlink_metadata(&path) {
+            Ok(info) if info.file_type().is_dir() => Some(Storage { root: path }),
+            Ok(_) => bail!(".dbsnap must be a directory in the project being initialized"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
         let db = config::resolve_at(project_root, explicit, allow_remote)?;
         let fingerprint = db.fingerprint();
         let _lock = existing.as_ref().map(Storage::lock).transpose()?;

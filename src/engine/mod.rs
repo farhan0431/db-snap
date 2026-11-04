@@ -1,3 +1,4 @@
+mod client_tools;
 pub mod mysql;
 mod mysql_diff;
 pub(crate) mod mysql_sandbox;

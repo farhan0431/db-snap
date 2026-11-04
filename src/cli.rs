@@ -58,8 +58,8 @@ pub enum Command {
         /// Inclusive upper bound for a single integer primary key
         #[arg(long, allow_negative_numbers = true)]
         key_max: Option<i64>,
-        #[arg(long, default_value = "json", value_parser = ["json", "git"])]
-        format: String,
+        #[arg(long, value_parser = ["json", "git"])]
+        format: Option<String>,
         /// Include stored row values in the Git-style terminal preview
         #[arg(long)]
         show_values: bool,
