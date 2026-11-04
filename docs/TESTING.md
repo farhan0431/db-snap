@@ -156,6 +156,11 @@ and installs the npm tarball, verifies the installed version, and runs the
 SQLite CLI/MCP process suite against the installed launcher. Publication
 requires a version tag.
 
+The [pre-release run for commit 8a84ecf](https://github.com/farhan0431/db-snap/actions/runs/41775572622)
+passed all nine CI jobs, all six release builds, and the CLI/MCP process
+suite from the installed npm tarball. A local Windows tarball smoke test
+also reported `dbsnap 0.4.1`.
+
 The process suite interrupts export after writing the archive header. Import
 must reject the partial archive and preserve the catalog and live data. The
 PostgreSQL suite exits after dump replay and before sandbox registration. It

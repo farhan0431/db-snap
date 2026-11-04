@@ -401,12 +401,14 @@ machine:
 - [x] Schema and row-count diffs, SQLite row previews, and sandbox creation
 - [x] npm distribution with prebuilt binaries and resumable catalog cleanup
 
-**v0.4.1 in development**
+**v0.4.1 validated for release**
 
 - [x] Portable archive export/import, server row previews, and Git-style CLI diff
 - [x] Sandboxes from trusted PostgreSQL custom dumps
-- [ ] Test interrupted archive writes and interrupted PostgreSQL sandbox replay
-- [ ] Validate hosted CI, release builds, and installation from the packed npm package
+- [x] Test partial archive rejection and PostgreSQL interruption after replay
+- [x] Validate hosted CI, six release builds, and CLI/MCP from the packed npm package
+
+See the [v0.4.1 pre-release run](https://github.com/farhan0431/db-snap/actions/runs/41775572622).
 
 **Next priorities**
 
