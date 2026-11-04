@@ -7,22 +7,22 @@ Use this checklist to track implementation and release verification. The README 
 - [x] Portable archive export/import, server row previews, and Git-style CLI diff
 - [x] Sandboxes from trusted PostgreSQL custom dumps
 - [x] Test partial archive rejection and PostgreSQL interruption after replay
-- [ ] Complete sandbox lifecycle management. The inventory and `doctor`
-  report the source snapshot and whether each registered resource is present.
-  Docker sandbox removal checks the exact registered ID and project label.
-  SQLite and PostgreSQL still require manual cleanup.
-- [ ] Report migration checks in CI. Produce bounded machine-readable results
-  and allow explicit failure rules for changes such as dropped tables.
-- [ ] Add primary-key range and column filters to row previews. Preserve the
-  row and byte limits and keep values private by default.
-- [ ] Explore opt-in sanitized fixture exports and expand recovery tests for
-  disk errors, network loss, and process interruptions.
-- [ ] Repeat hosted CI, six release builds, and npm package tests on the
-  completed v0.4.1 branch.
+- [x] List registered sandbox resources and report their state in `doctor`.
+  Remove newly registered Docker sandboxes only after verifying the exact
+  container ID and project label. SQLite and PostgreSQL cleanup is manual.
+- [x] Produce a bounded JSON migration report and an opt-in table-drop
+  policy. The policy covers SQLite, PostgreSQL clones, and standard
+  MySQL/MariaDB dumps.
+- [x] Filter row previews by column and single-integer primary-key range.
+  Keep the row and byte budgets and the counts-only default.
+- [x] Document a design for sanitized fixture export and test archive disk
+  errors, process interruption, and a lost PostgreSQL replay connection.
+- [x] Validate hosted CI, six release builds, and the installed npm tarball.
 
-The [previous pre-release run](https://github.com/farhan0431/db-snap/actions/runs/41775572622)
-validated the original portability and diff work. The expanded checklist
-requires another run.
+The [final pre-release run](https://github.com/farhan0431/db-snap/actions/runs/41778356056)
+validated the expanded code at `1565dd9`. The sanitization design is
+exploratory. Verify ownership for automatic SQLite and PostgreSQL removal
+in a future change.
 
 ### Sanitized fixture export design
 

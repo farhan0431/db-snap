@@ -168,3 +168,34 @@ checks the source rows and registry, verifies the isolated copy, and drops
 only the sandbox named by that test process. A real interruption can leave
 an incomplete export file or an unregistered sandbox. Inspect the resource
 before removing it and retry the command after cleanup.
+
+The [final pre-release run for commit 1565dd9](https://github.com/farhan0431/db-snap/actions/runs/41778356056)
+passed all nine CI jobs, six release builds, and the installed npm tarball
+test. Its process tests include range and column filters, table-drop policy
+failures, refusal to delete another project's Docker sandbox, an injected
+archive disk-full error, and a terminated PostgreSQL replay connection.
+
+## Row preview benchmark
+
+Windows debug CLI, 8,000 rows per snapshot. Each measured command compares a
+snapshot with itself and verifies zero changes. The baseline is a build
+before the row preview optimizations. The filtered case selects 100 rows and
+one non-key column. Medians include process startup and snapshot preparation.
+
+| Engine and path | Baseline full | Updated full | Updated filtered | Runs per case |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite delta snapshot | 2,125.4 ms | 828.7 ms | 68.2 ms | 7 |
+| PostgreSQL 17 clone | 984.6 ms | 507.3 ms | 117.5 ms | 7 |
+| MySQL 8.0 Docker dump | 44,975.5 ms | 27,934.9 ms | 19,696.6 ms | 3 |
+
+The updated self-comparison prepares a snapshot once. A comparison between
+two different snapshots still prepares both. MySQL times include creating
+an isolated Docker server, replaying the dump, and removing the container.
+Filters reduce the query work but do not avoid replay. The MySQL sample is
+small and container startup varies. MariaDB has functional coverage in CI.
+
+To reproduce, run `scripts/bench-row-preview.py --baseline OLD_BINARY
+--binary NEW_BINARY --engine sqlite` with Python. Select `postgres` or
+`mysql` and set the matching disposable loopback test URL for server
+benchmarks. The MySQL benchmark requires Docker and the matching client
+tools. Use `--runs 3` for the slower replay case.
