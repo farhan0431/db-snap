@@ -19,10 +19,8 @@ snapshot before another restore; see the recovery steps below.
 
 Requires Node.js 16 or later.
 
-The published v0.4.0 includes verify, doctor, recover, exec, live diff, SQLite
-row previews, and sandboxes for SQLite, PostgreSQL clones, and MySQL/MariaDB.
 Portable archives, server row previews, Git output, and PostgreSQL dump
-sandboxes are part of the upcoming v0.4.1 and require a build from this branch.
+sandboxes require dbsnap v0.4.1 or later.
 
 ```bash
 npm install -g @farhan0431/db-snap
@@ -145,11 +143,11 @@ file; review it against the repository's current skill when upgrading.
 | `dbsnap recover` | Resume the recovery journal; ambiguous PostgreSQL states require inspection. |
 | `dbsnap exec -- npm run db:migrate` | Checkpoint before a child command; retain it on failure, with no automatic rollback. |
 | `dbsnap diff-live before` | Capture and retain the current state, then compare. |
-| `dbsnap diff-rows before after --table users` | Bounded row-change counts by primary key, default limit 10,000 rows. The feature branch adds server preview and Git-style output. |
+| `dbsnap diff-rows before after --table users` | Bounded row-change counts by primary key, default limit 10,000 rows. v0.4.1 adds server preview and Git-style output. |
 | `dbsnap sandbox before --output experiment.db` | Fork SQLite into a new file; existing files are never overwritten. |
 | `dbsnap sandbox before` | Create an independent PostgreSQL clone, recorded in `sandboxes.json`. |
 | `dbsnap sandbox before --docker-image mysql:8.0` | Explicit isolated MySQL server; use `mariadb:11` for MariaDB. Docker required. |
-| `dbsnap sandbox-list` | In development for v0.4.1. List recorded sandboxes, their source snapshots, and resource state. |
+| `dbsnap sandbox-list` | List recorded sandboxes, their source snapshots, and resource state. |
 | `dbsnap sandbox-remove CONTAINER_ID` | Remove a newly created Docker sandbox after verifying its project ownership. |
 | `dbsnap diff-report before after --fail-on-drop-table` | Bounded JSON for automation. Exit 3 means a table was removed. |
 
@@ -212,13 +210,13 @@ require explicit `--docker-image mysql:8.0` or `mariadb:11`: a separate Docker
 server imports the verified dump with its original schema name, network disabled,
 no published ports/host mounts/source credentials. Use `docker exec` for SQL
 experiments and remove the returned container explicitly afterwards. Failed
-imports remove only the newly created container. The feature branch also
+imports remove only the newly created container. v0.4.1 also
 supports sandbox replay from trusted PostgreSQL custom dumps. See the workflow
 guide below.
 
 ### Portable archives and Git-style row previews
 
-These commands describe the upcoming v0.4.1:
+These commands require v0.4.1 or later.
 
 ```sh
 dbsnap export before --output before.dbsnap
@@ -277,21 +275,20 @@ After success, safety snapshots remain pinned until you review and explicitly
 unpin them. Restore remains non-atomic and requires trusted dumps; preflight
 checks do not prevent another application from reconnecting during replay.
 
-## Database requirements
+## Database support
 
-| Database | Snapshot method | Requirements |
-| --- | --- | --- |
-| SQLite | Online backup and deduplicated chunks | No separate database client. |
-| PostgreSQL | Server-side clone or `pg_dump` | Database creation privileges; PostgreSQL client tools for dump mode. |
-| MySQL/MariaDB | Consistent logical dump | Compatible `mysql`/`mysqldump` or MariaDB client tools in `PATH`; transactional tables for consistent dumps. |
+| Database | Snapshot and restore | Preview and sandbox in v0.4.1 | Requirements |
+| --- | --- | --- | --- |
+| SQLite | Online backup with deduplicated chunks. Restore into the existing database file. | Primary-key row preview and sandbox as a new file. | An existing SQLite file. |
+| PostgreSQL | Server-side clone for local iteration or custom dump for transfer. Dump restore replays in staging before cutover. | Read clone rows directly. Replay trusted custom dumps when explicitly requested. Create a sandbox from either kind. | Database creation privileges for server-side operations. Matching-major `pg_dump` and `pg_restore` for dumps. |
+| MySQL/MariaDB | Logical dumps with routines, triggers, and events. In-place restore uses a pinned safety copy and journal. | Offline table schema/count diff. Use Docker for row preview and sandbox. | Compatible native clients on `PATH`, transactional tables for consistency, and Docker for replay in a sandbox. |
 
-PostgreSQL server-side clones are stored on the database server. Use dump mode
-when the snapshot needs to survive removal of that server's data volume.
-For dump save and restore, install `pg_dump` and `pg_restore` matching the
-PostgreSQL server's major version. Mismatched tools are rejected before restore.
-The SQLite database file must already exist. MySQL/MariaDB snapshots retain
-routines, triggers and events, although diff does not compare those objects.
-Snapshot runtime and connection disruption depend on the engine and data size.
+For PostgreSQL, keep clones on the server and use dumps to transfer snapshots
+between machines. For MySQL/MariaDB, start with offline `diff`. Use
+`diff-rows --docker-image mysql:8.0` or `--docker-image mariadb:11` when you
+need row changes. The destination project must use the original database
+name when importing MySQL/MariaDB archives. During in-place restore, stop
+writers and scheduled events and preserve the recovery journal on failure.
 
 ## Safety
 

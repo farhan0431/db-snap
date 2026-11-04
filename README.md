@@ -34,7 +34,7 @@ checking the target database and the engine's restore requirements.
   shares unchanged chunks between snapshots. PostgreSQL offers server-side
   clones or custom dumps. MySQL/MariaDB uses logical dumps.
 - **Review changes before rollout.** Use `diff` for schema and table counts.
-  In the upcoming v0.4.1, `diff-rows` also compares rows by primary key across
+  In v0.4.1, `diff-rows` also compares rows by primary key across
   engines and can show changed values in a Git-style terminal view.
 - **Rehearse on a copy.** Create a sandbox, point your app and migration runner
   at it explicitly, then check the result before touching the intended target.
@@ -43,6 +43,9 @@ checking the target database and the engine's restore requirements.
 - **Give agents a recovery path.** The built-in MCP server exposes checkpoint,
   verification, and diff tools. Restore, prune, and trusted dump replay require
   an authorized session and approval for each call.
+
+See [database support](#database-support) and the
+[manual workflow comparison and benchmark](#workflow-and-performance).
 
 ## Using dbsnap before a deployment
 
@@ -131,20 +134,89 @@ and Linux (x64 gnu/musl + arm64)** — no Node.js, Python, Docker, or
 database client libraries required for the core (client tools only for
 `pg_dump`/`mysqldump` modes).
 
-### Engines at a glance
+## Database support
 
-| | SQLite | PostgreSQL | MySQL / MariaDB |
-| :--- | :--- | :--- | :--- |
-| Method | delta snapshots (content-addressed chunks) | server-side template clone, or `pg_dump -Fc` | consistent `--single-transaction` dump |
-| Snapshot cost | Reads database pages and stores changed chunks | Copies a database on the server or writes a dump | Reads and writes a logical dump |
-| Incremental cost | kilobytes (only changed 64 KB chunks) | full copy server-side | full dump |
-| Snapshot with writers active | SQLite Online Backup API | Clone briefly fences connections. Dump can run online. | Consistent for transactional tables. Avoid concurrent schema changes. |
-| Where to retain snapshots | Keep the project snapshot store on persistent storage. | Clones depend on the server data directory. Keep dumps on persistent storage. | Keep the project snapshot store on persistent storage. |
-| Extra requirements | none | `CREATEDB` privilege; `pg_dump` for dump mode | `mysqldump`/`mariadb-dump` in PATH |
+This matrix describes v0.4.1. Check your installed
+version with `dbsnap --version`. For a server database, set `DATABASE_URL`
+to the intended development database and run `dbsnap init` first.
 
-Supported: **SQLite** (delta snapshots), **PostgreSQL** (server-side template
-clones + portable `pg_dump`), and **MySQL/MariaDB** (consistent logical dumps
-with flavor detection) — design details in [docs/DESIGN.md](docs/DESIGN.md).
+| Capability | SQLite | PostgreSQL | MySQL / MariaDB |
+| --- | --- | --- | --- |
+| Save | Online page backup with deduplicated chunks | Server-side clone or custom dump | Transactional logical dump with client flavor detection |
+| Restore | Verify and restore into the existing file | Working clone or staged dump, with journaled cutover | In-place replay with a mandatory pinned safety snapshot and journal |
+| Schema and row-count diff | Tables, views, indexes, and triggers | Clone table and view definitions, or offline comparison of two compatible custom dumps | Offline comparison of table definitions and counts in standard dbsnap dumps |
+| Primary-key row preview | Reads verified staged snapshot files | Reads clones directly. Custom dumps require `--replay-dumps`. | Replays each trusted dump into an isolated Docker server |
+| Sandbox | New SQLite file | Separate database from a clone or trusted custom dump | Docker container with networking disabled and no published port |
+| Portable archive | Packages complete SQLite data | Packages a custom dump. Exports clones by converting them to dumps. | Packages the logical dump. The destination needs the original database name. |
+| CI table-drop policy | Supported | Supported for clones | Supported for standard dbsnap dumps |
+
+### SQLite · quick checkpoints for local files
+
+Use SQLite when you want to preserve your local schema and data without a
+separate database server. The Online Backup API takes a consistent copy,
+including changes recorded in WAL, and the snapshot store reuses unchanged
+chunks. Keep the database file and project snapshot store on persistent
+storage. The database file must already exist.
+
+```sh
+dbsnap init --db ./dev.db
+dbsnap save before-migration
+dbsnap sandbox before-migration --output ./experiment.db
+```
+
+Point your migration runner at the sandbox file. Row preview requires an
+explicit primary key, and its row and byte limits also apply to SQLite.
+
+### PostgreSQL · clones for daily work, dumps for transfer
+
+Use the default clone for a fast iteration loop on a development server.
+Cloning uses server storage and briefly fences connections to the source.
+A clone depends on the server's data volume. Use custom dump mode when you
+need a file you can carry to another compatible server.
+
+```sh
+dbsnap save before-migration
+# Apply a change to your development database.
+dbsnap save after-migration
+dbsnap diff-rows before-migration after-migration --table public.users
+dbsnap sandbox before-migration
+
+dbsnap save portable-seed --method dump
+dbsnap export portable-seed --output seed.dbsnap
+```
+
+Server-side sandbox creation and restore require database creation privileges.
+Use matching-major `pg_dump` and `pg_restore` for dump operations, and make
+sure the destination supports the dump's extensions. Dump restore replays in
+staging before the journaled cutover. For ordinary `diff`, compare two clones
+or two custom dumps. Clone verification checks existence. Dump verification
+checks archive integrity.
+
+### MySQL and MariaDB · offline schema review and isolated row preview
+
+Use compatible `mysql` and `mysqldump` tools, or their MariaDB equivalents, on
+`PATH`. Snapshot consistency relies on transactional tables such as InnoDB.
+Avoid concurrent schema changes during the dump. Snapshots retain routines,
+triggers, and events, while ordinary diff compares tables and row counts.
+
+```sh
+dbsnap save before-migration
+# Apply a change to your development database.
+dbsnap save after-migration
+dbsnap diff before-migration after-migration
+dbsnap diff-rows before-migration after-migration --table users --docker-image mysql:8.0
+dbsnap sandbox before-migration --docker-image mysql:8.0
+```
+
+Use `mariadb:11` for MariaDB. Start with offline `diff` for a quick review,
+then use Docker row preview when you need to see row-level changes.
+Docker startup and dump replay contribute to preview latency.
+Use `docker exec` to reach the sandbox because it has no published port.
+
+**Restore to the original database is non-atomic.** Stop application writers,
+connections, and scheduled events before restoring. If replay fails, keep the
+journal and pinned safety snapshot for recovery. See the
+[MySQL/MariaDB recovery guide](docs/MYSQL-RESTORE.md).
 
 ## CLI
 
@@ -194,10 +266,8 @@ When a safety snapshot is enabled, restore stops if it cannot be created.
 
 ### Portable archives, row previews, and sandboxes
 
-**Availability.** The published v0.4.0 supports SQLite row previews, SQLite and
-PostgreSQL clone sandboxes, and MySQL/MariaDB Docker sandboxes. Portable
-`export/import`, Git output, server row previews, and PostgreSQL dump sandboxes
-are available in the v0.4.1 source on this feature branch.
+**Version requirement.** Portable `export/import`, Git output, server row
+previews, and PostgreSQL dump sandboxes require dbsnap v0.4.1 or later.
 
 ```sh
 # Export in the source project, then import in the destination project
@@ -208,12 +278,6 @@ dbsnap verify transferred
 # Show actual changes in the terminal
 dbsnap diff-rows before after --table users --format git --show-values
 ```
-
-| Engine | Archive transfer | Row preview | Sandbox |
-| --- | --- | --- | --- |
-| SQLite | Includes the complete snapshot, even when the original uses delta chunks. | Select one table with a primary key. | `dbsnap sandbox before --output ./experiment.db` creates a new file. |
-| PostgreSQL | Existing custom dumps are packaged. Clone export creates a custom dump with matching `pg_dump` tools. | Clones are read directly. Add `--replay-dumps` for trusted custom dumps. Use `schema.table` outside `public`. | `dbsnap sandbox before` creates a separate database from a clone or trusted dump. Dump replay needs matching `pg_restore`, compatible extensions, and permission to create databases. |
-| MySQL/MariaDB | The destination must use the original database name. | Pass `--docker-image mysql:8.0` or `--docker-image mariadb:11` to replay each trusted dump in a temporary container. | Pass the same image option to create a dedicated container with networking disabled and no published ports. |
 
 - **Treat archives as database copies.** They can contain sensitive application
   data. Keep them private and import only from trusted sources. Checksums detect
@@ -348,8 +412,8 @@ apply it across every project. The canonical copy lives in
   while the file is open) → `PRAGMA wal_checkpoint(TRUNCATE)` so the dev
   server sees the new state immediately.
 - **PostgreSQL save (clone, default):** `CREATE DATABASE __dbsnap_<id>
-  TEMPLATE dev` — a block-level copy inside the server, done in ~1 s with a
-  brief connection blackout (your dev server reconnects automatically).
+  TEMPLATE dev`. The server copies the database while dbsnap briefly fences
+  connections. Runtime depends on the database size and storage.
   **`--method dump`:** `pg_dump -Fc` — slower but portable across machines.
 - **PostgreSQL restore:** create a working database, fence the target, record
   a safety snapshot, and use a journaled rename cutover. Dump replay occurs in
@@ -357,8 +421,8 @@ apply it across every project. The canonical copy lives in
 - **MySQL/MariaDB save:** `mysqldump --single-transaction` (consistent for
   InnoDB without locking writers) → zstd → blake3. Flavor detection picks
   `mariadb-dump` vs `mysqldump` and retries with a fallback flag set for the
-  known cross-version quirks. Honest limit: dumps take seconds on big
-  databases — MySQL has no physical hot-copy API.
+  known cross-version quirks. Dump and replay time depend on database size,
+  server load, and storage.
 - **MySQL/MariaDB restore:** restores objects in place without dropping the database; mandatory safety snapshot, with manual recovery after interruptions.
 - **Prune** is a real GC: chunks shared by surviving snapshots are never
   deleted; server-side clones of pruned snapshots are dropped too. Full
@@ -376,17 +440,49 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 scripts/e2e.sh       # SQLite: hot snapshot/rollback while a "dev server" writes
 bash scripts/e2e-pg.sh    # PostgreSQL: clone snapshot, destructive DDL, rollback
-bash scripts/e2e-mysql.sh # stops immediately; rollback is currently disabled
+bash scripts/e2e-mysql.sh # MySQL/MariaDB: verified in-place restore on a disposable database
 ```
 
 The PostgreSQL demo requires Python 3 and a disposable server. It removes its
 test database but retains the snapshot catalog and may leave server-side
 clones; it prints the catalog location for inspection.
 
-## Measured, not marketing
+## Workflow and performance
 
-All numbers from the test suite and `scripts/e2e-*.sh` on a development
-machine:
+When rehearsing a migration, the time cost includes preparing snapshots,
+remembering where they live, and making the before/after comparison repeatable.
+dbsnap gives each checkpoint an ID so the same snapshots can be used for
+inspection, rehearsal, and recovery.
+
+| Task | Manual workflow | With dbsnap |
+| --- | --- | --- |
+| Keep a restore point | Run an engine-specific backup command and record its file or database name. | `dbsnap save before-migration` captures schema and data and records the checkpoint in the project catalog. |
+| Review what changed | Compare schema exports, then write queries to match rows by primary key. | `dbsnap diff before-migration after-migration` reviews schema and counts. `diff-rows` can focus on a table, selected columns, and an integer key range. |
+| Try the migration on a copy | Prepare a separate database, restore into it, and record what to clean up. | `dbsnap sandbox before-migration` creates a PostgreSQL sandbox. SQLite takes a new output path, and MySQL/MariaDB uses an explicitly selected Docker image. |
+| Recover a failed change | Locate the right backup, check the target, and follow the engine's restore procedure. | `dbsnap restore SNAPSHOT_ID` checks the binding and uses the engine's safety snapshot and recovery flow. |
+
+### Row preview benchmark
+
+For a self-comparison on **8,000 rows**, dbsnap v0.4.1 prepares the snapshot
+once and validates the preview limits. The filtered case selects **100 rows
+and one non-key column**.
+
+| Engine and snapshot | Earlier dbsnap build | v0.4.1 full preview | v0.4.1 filtered preview |
+| --- | ---: | ---: | ---: |
+| SQLite delta | 2,125 ms | **829 ms** | **68 ms** |
+| PostgreSQL 17 clone | 985 ms | **507 ms** | **118 ms** |
+| MySQL 8.0 dump in Docker | 45.0 s | **27.9 s** | **19.7 s** |
+
+These are median end-to-end times from local Windows debug builds. The
+benchmark compares two dbsnap builds. The manual workflow above compares
+steps. For two different snapshots, both still need preparation. MySQL
+times include Docker startup, dump replay, and cleanup. Filters reduce
+row work while dump replay still runs. See the [benchmark method and
+reproduction steps](docs/TESTING.md#row-preview-benchmark).
+
+### Snapshot and restore examples
+
+These results come from local tests and demos on disposable databases.
 
 | Scenario | Result |
 | :--- | :--- |
