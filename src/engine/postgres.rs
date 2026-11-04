@@ -612,6 +612,8 @@ impl PostgresEngine {
                 .to_string(),
                 method: "pg-clone".to_string(),
                 pinned: false,
+                message: None,
+                git_branch: None,
                 source_state: None,
             },
             linked: false,
@@ -661,6 +663,8 @@ impl PostgresEngine {
                 blake3: hash,
                 method: "pg-dump".to_string(),
                 pinned: false,
+                message: None,
+                git_branch: None,
                 source_state: None,
             },
             linked: false,
@@ -751,6 +755,8 @@ impl PostgresEngine {
                     .to_string(),
                     method: "pg-clone".to_string(),
                     pinned: false,
+                    message: None,
+                    git_branch: None,
                     source_state: None,
                 };
                 meta.snapshots.push(safety_record.clone());

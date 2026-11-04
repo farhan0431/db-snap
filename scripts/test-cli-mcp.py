@@ -169,6 +169,20 @@ def main():
             cli("save", "before")
             sql("INSERT INTO items VALUES(2,'second'); CREATE TABLE extra(id INT);")
             cli("save", "after")
+            cli("save", "qa-note", "-m", "QA checkpoint")
+            latest = json.loads(cli("status", "--json"))["latest"]
+            assert latest["tag"] == "qa-note" and latest["message"] == "QA checkpoint"
+            assert "qa-note" in cli("status")
+            cli("tag", "qa-note", "qa-renamed")
+            cli("pin", "qa-renamed")
+            cli("rm", "qa-renamed", error=True)
+            cli("unpin", "qa-renamed")
+            cli("rm", "qa-renamed")
+            catalog = json.loads(cli("list", "--json"))
+            ephemeral = json.loads(cli("diff-live", "before", "--ephemeral"))
+            assert ephemeral["live_snapshot_retained"] is False
+            assert "live_snapshot_id" not in ephemeral and "extra" in ephemeral["comparison"]
+            assert json.loads(cli("list", "--json")) == catalog
             assert json.loads(cli("verify"))["ok"]
             assert json.loads(cli("doctor"))["mutations_performed"] is False
             command_result = json.loads(cli("exec", "--", sys.executable, "-c", "print('checkpoint child')"))

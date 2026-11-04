@@ -208,8 +208,43 @@ pub fn save_at(
     })())
 }
 
+#[derive(Default)]
+pub struct SnapshotAnnotations {
+    pub message: Option<String>,
+    pub git_branch: bool,
+}
+
+pub fn save_with_annotations_at(
+    root: &Path,
+    explicit: Option<&str>,
+    tag: Option<String>,
+    force: bool,
+    allow_remote: bool,
+    method: engine::SaveMethod,
+    annotations: SnapshotAnnotations,
+) -> Result<String> {
+    redact((|| {
+        let ctx = context_at(root, explicit, force, allow_remote)?;
+        save_report_with(&ctx, tag, method, false, annotations)
+    })())
+}
+
+fn current_git_branch(project: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(project)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = std::str::from_utf8(&output.stdout).ok()?.trim_end();
+    (!branch.is_empty() && branch.len() <= 512 && !branch.chars().any(char::is_control))
+        .then(|| util::mask(branch))
+}
+
 pub fn save_with(ctx: &Ctx, tag: Option<String>, method: engine::SaveMethod) -> Result<String> {
-    save_report_with(ctx, tag, method, false)
+    save_report_with(ctx, tag, method, false, SnapshotAnnotations::default())
 }
 
 pub fn save_json_with(
@@ -217,7 +252,7 @@ pub fn save_json_with(
     tag: Option<String>,
     method: engine::SaveMethod,
 ) -> Result<String> {
-    save_report_with(ctx, tag, method, true)
+    save_report_with(ctx, tag, method, true, SnapshotAnnotations::default())
 }
 
 fn save_report_with(
@@ -225,7 +260,22 @@ fn save_report_with(
     tag: Option<String>,
     method: engine::SaveMethod,
     json: bool,
+    annotations: SnapshotAnnotations,
 ) -> Result<String> {
+    let message = annotations.message.as_deref().map(util::mask);
+    if annotations
+        .message
+        .iter()
+        .chain(&message)
+        .any(|note| note.len() > 512 || note.chars().any(char::is_control))
+    {
+        bail!("snapshot message must be a single line of at most 512 bytes");
+    }
+    let git_branch = if annotations.git_branch {
+        ctx.store.root.parent().and_then(current_git_branch)
+    } else {
+        None
+    };
     let _lock = ctx.store.lock()?;
     ensure_active_binding(ctx)?;
     let tag = match tag {
@@ -239,13 +289,15 @@ fn save_report_with(
     let taken = meta.ids();
     let previous = meta.latest();
     let engine = engine::make(&ctx.db)?;
-    let outcome = engine.save(
+    let mut outcome = engine.save(
         &ctx.store,
         &tag,
         &engine::SaveOpts { method },
         previous.as_ref(),
         &taken,
     )?;
+    outcome.record.message = message;
+    outcome.record.git_branch = git_branch;
     meta.snapshots.push(outcome.record.clone());
     ctx.store.write_metadata(&meta)?;
 
@@ -580,19 +632,27 @@ fn schema_diff_with(
             "table drop policy requires PostgreSQL clones; archive diff only inventories COPY data"
         );
     }
-    let diff = match &ctx.db.target {
+    let diff = schema_diff_records(ctx, &left, &right)?;
+    Ok((diff, left, right))
+}
+
+fn schema_diff_records(
+    ctx: &Ctx,
+    left: &SnapshotRecord,
+    right: &SnapshotRecord,
+) -> Result<engine::SchemaDiff> {
+    match &ctx.db.target {
         DbTarget::Sqlite(path) if left.engine == "sqlite" && right.engine == "sqlite" => {
-            engine::sqlite::SqliteEngine::new(path.clone()).schema_diff(&ctx.store, &left, &right)
+            engine::sqlite::SqliteEngine::new(path.clone()).schema_diff(&ctx.store, left, right)
         }
         DbTarget::Postgres(pg) if left.engine == "postgres" && right.engine == "postgres" => {
-            engine::postgres::PostgresEngine::new(pg.clone()).schema_diff(&ctx.store, &left, &right)
+            engine::postgres::PostgresEngine::new(pg.clone()).schema_diff(&ctx.store, left, right)
         }
         DbTarget::Mysql(target) if left.engine == "mysql" && right.engine == "mysql" => {
-            engine::mysql::MysqlEngine::new(target.clone()).schema_diff(&ctx.store, &left, &right)
+            engine::mysql::MysqlEngine::new(target.clone()).schema_diff(&ctx.store, left, right)
         }
         _ => bail!("snapshot diff is not supported for these snapshot types"),
-    }?;
-    Ok((diff, left, right))
+    }
 }
 
 pub fn list_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
@@ -685,6 +745,136 @@ pub fn list_with(ctx: &Ctx) -> Result<String> {
         out.push_str("\nPostgreSQL clones have a metadata fingerprint, not a content checksum.");
     }
     Ok(out)
+}
+
+fn ensure_no_restore_journal(ctx: &Ctx) -> Result<()> {
+    for journal in ["mysql-restore.json", "postgres-restore.json"] {
+        match fs::symlink_metadata(ctx.store.root.join(journal)) {
+            Ok(_) => bail!("resolve pending restore recovery before changing snapshots"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+pub fn tag_at(
+    root: &Path,
+    explicit: Option<&str>,
+    selector: &str,
+    new_tag: &str,
+) -> Result<String> {
+    redact((|| {
+        util::validate_tag(new_tag)?;
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        ensure_active_binding(&ctx)?;
+        ensure_no_restore_journal(&ctx)?;
+        let mut meta = ctx.store.load_metadata()?;
+        let record = meta.find(Some(selector))?;
+        if meta.snapshots.iter().any(|s| {
+            s.id != record.id
+                && (s.tag == new_tag || s.id.starts_with(new_tag) || new_tag.starts_with(&s.id))
+        }) {
+            bail!("tag conflicts with an existing snapshot selector");
+        }
+        for snapshot in &mut meta.snapshots {
+            if snapshot.id == record.id {
+                snapshot.tag = new_tag.to_owned();
+            }
+        }
+        ctx.store.write_metadata(&meta)?;
+        Ok(format!("tagged snapshot {} as {new_tag:?}", record.id))
+    })())
+}
+
+pub fn remove_snapshot_at(root: &Path, explicit: Option<&str>, selector: &str) -> Result<String> {
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        ensure_active_binding(&ctx)?;
+        ensure_no_restore_journal(&ctx)?;
+        let mut meta = ctx.store.load_metadata()?;
+        let record = meta.find(Some(selector))?;
+        if record.pinned {
+            bail!("snapshot {} is pinned; unpin it before removal", record.id);
+        }
+        let id = record.id.clone();
+        meta.snapshots.retain(|s| s.id != id);
+        queue_and_collect(&ctx, &mut meta, record, "rm_after_metadata")?;
+        Ok(format!("removed snapshot {id}"))
+    })())
+}
+
+pub fn diff_live_ephemeral_at(
+    root: &Path,
+    explicit: Option<&str>,
+    selector: &str,
+) -> Result<String> {
+    redact((|| {
+        let ctx = context_at(root, explicit, false, false)?;
+        let _lock = ctx.store.lock()?;
+        ensure_active_binding(&ctx)?;
+        ensure_no_restore_journal(&ctx)?;
+        let mut meta = ctx.store.load_metadata()?;
+        let from = meta.find(Some(selector))?;
+        let method = if from.method == "pg-dump" {
+            engine::SaveMethod::Dump
+        } else {
+            engine::SaveMethod::Clone
+        };
+        let engine = engine::make(&ctx.db)?;
+        let live = engine
+            .save(
+                &ctx.store,
+                "ephemeral-live",
+                &engine::SaveOpts { method },
+                Some(&from),
+                &meta.ids(),
+            )?
+            .record;
+
+        // Record the artifact for GC before comparing it. It never enters the
+        // active snapshot catalog, and prune can retry interrupted cleanup.
+        meta.pending_gc.push(live.clone());
+        ctx.store.write_metadata(&meta)?;
+        check_cleanup_failpoint("ephemeral_after_metadata")?;
+        let comparison = schema_diff_records(&ctx, &from, &live);
+        collect_queued(&ctx, &mut meta, &live.id)?;
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "operation": "diff_live", "from": from.id,
+            "live_snapshot_retained": false, "comparison": comparison?.text
+        }))?)
+    })())
+}
+
+fn queue_and_collect(
+    ctx: &Ctx,
+    meta: &mut Metadata,
+    record: SnapshotRecord,
+    failpoint: &str,
+) -> Result<()> {
+    validate_prune_survivors(&ctx.store, meta, std::slice::from_ref(&record))?;
+    let id = record.id.clone();
+    meta.pending_gc.push(record);
+    ctx.store.write_metadata(meta)?;
+    check_cleanup_failpoint(failpoint)?;
+    collect_queued(ctx, meta, &id)
+}
+
+fn check_cleanup_failpoint(failpoint: &str) -> Result<()> {
+    if std::env::var("DBSNAP_TEST_FAILPOINT").as_deref() == Ok(failpoint) {
+        bail!("injected interruption after metadata commit; cleanup remains queued");
+    }
+    Ok(())
+}
+
+fn collect_queued(ctx: &Ctx, meta: &mut Metadata, id: &str) -> Result<()> {
+    retry_gc(&ctx.store, meta, pg_target(&ctx.db))?;
+    if meta.pending_gc.iter().any(|record| record.id == id) {
+        bail!("snapshot artifact cleanup is pending; inspect doctor and retry prune --keep N with N at least the active snapshot count");
+    }
+    Ok(())
 }
 
 pub fn prune_at(root: &Path, explicit: Option<&str>, keep: usize) -> Result<String> {
@@ -827,6 +1017,7 @@ pub fn status_json_at(root: &Path, explicit: Option<&str>) -> Result<String> {
             "engine_detail": info.detail,
             "database_size_bytes": info.size_bytes,
             "snapshot_count": meta.snapshots.len(),
+            "latest": meta.latest().map(|s| serde_json::json!({ "id": s.id, "tag": s.tag, "created_at": s.created_at, "git_branch": s.git_branch, "message": s.message })),
             "chunk_count": chunks,
             "chunk_bytes": chunk_bytes,
             "disk_free_bytes": ctx.store.free_bytes().ok(),
@@ -875,8 +1066,26 @@ pub fn status_with(ctx: &Ctx) -> Result<String> {
         ""
     };
 
+    let latest = meta.latest().map_or_else(
+        || "none".to_string(),
+        |s| {
+            let branch = s
+                .git_branch
+                .map_or_else(String::new, |branch| format!(" (branch: {branch})"));
+            let note = s
+                .message
+                .map_or_else(String::new, |note| format!(" — {note}"));
+            format!(
+                "{} {:?} ({}){branch}{note}",
+                s.id,
+                s.tag,
+                util::relative_time(s.created_at)
+            )
+        },
+    );
+
     Ok(format!(
-        "database  : {} ({})\nengine    : {}{}\nsnapshots : {} ({} unique files, {} on disk)\ndelta     : {manifests} manifests, {objects} chunks ({})\ntmp       : {tmp_leftovers} leftover files{free}{recovery}",
+        "database  : {} ({})\nengine    : {}{}\nsnapshots : {} ({} unique files, {} on disk)\nlatest    : {latest}\ndelta     : {manifests} manifests, {objects} chunks ({})\ntmp       : {tmp_leftovers} leftover files{free}{recovery}",
         ctx.db.engine,
         ctx.db.display(),
         info.detail,

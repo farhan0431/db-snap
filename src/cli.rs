@@ -72,9 +72,12 @@ pub enum Command {
         #[arg(long)]
         db: Option<String>,
     },
-    /// Capture and retain a live checkpoint, then compare it with a snapshot
+    /// Compare live state against a snapshot (retains a checkpoint by default)
     DiffLive {
         tag_or_id: String,
+        /// Compare without retaining a restore point
+        #[arg(long)]
+        ephemeral: bool,
         #[arg(long)]
         db: Option<String>,
     },
@@ -135,6 +138,12 @@ pub enum Command {
     },
     /// Save a snapshot of the current database state
     Save {
+        /// Optional snapshot note (up to 512 bytes; do not include secrets)
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Record the current Git branch, when available
+        #[arg(long)]
+        git_branch: bool,
         /// Short label for the snapshot, e.g. "before-auth-migration"
         tag: Option<String>,
         /// Database path or URL (overrides project binding)
@@ -149,6 +158,19 @@ pub enum Command {
         /// Operate even if the database differs from the project binding
         #[arg(long)]
         force: bool,
+    },
+    /// Rename a snapshot tag
+    Tag {
+        snapshot: String,
+        new_tag: String,
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Remove one unpinned snapshot
+    Rm {
+        snapshot: String,
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Restore the database to a snapshot (default: the most recent)
     Restore {

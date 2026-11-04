@@ -1,11 +1,11 @@
 name: Release
 
-# Validate all six binaries on the v0.4.1 feature branch. Version tags also
+# Validate all six binaries on version release branches. Version tags also
 # create a GitHub Release and publish using NPM_TOKEN.
 
 on:
   push:
-    branches: ["feature/snapshot-portability-and-diff"]
+    branches: ["release/v*"]
     tags: ["v*"]
 
 permissions:

@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-11-04
+
+### Added
+
+- Rename a snapshot with `dbsnap tag` and remove a single unpinned snapshot
+  with `dbsnap rm`.
+- Record local notes and optional Git branch context on save. Status now
+  includes the latest restore point.
+- Compare live state with `diff-live --ephemeral` without retaining a restore
+  point. Interrupted cleanup of recorded artifacts can be retried with prune.
+
 ## [0.4.2] — 2026-11-04
 
 ### Fixed

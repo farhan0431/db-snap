@@ -73,7 +73,17 @@ fn run(command: Command) -> i32 {
                 key_max,
             },
         ),
-        Command::DiffLive { tag_or_id, db } => ops::diff_live_at(&root, db.as_deref(), &tag_or_id),
+        Command::DiffLive {
+            tag_or_id,
+            db,
+            ephemeral,
+        } => {
+            if ephemeral {
+                ops::diff_live_ephemeral_at(&root, db.as_deref(), &tag_or_id)
+            } else {
+                ops::diff_live_at(&root, db.as_deref(), &tag_or_id)
+            }
+        }
         Command::Sandbox {
             tag_or_id,
             db,
@@ -103,7 +113,26 @@ fn run(command: Command) -> i32 {
             method,
             allow_remote,
             force,
-        } => ops::save_at(&root, db.as_deref(), tag, force, allow_remote, method),
+            message,
+            git_branch,
+        } => ops::save_with_annotations_at(
+            &root,
+            db.as_deref(),
+            tag,
+            force,
+            allow_remote,
+            method,
+            ops::SnapshotAnnotations {
+                message,
+                git_branch,
+            },
+        ),
+        Command::Tag {
+            snapshot,
+            new_tag,
+            db,
+        } => ops::tag_at(&root, db.as_deref(), &snapshot, &new_tag),
+        Command::Rm { snapshot, db } => ops::remove_snapshot_at(&root, db.as_deref(), &snapshot),
         Command::Restore {
             tag_or_id,
             db,

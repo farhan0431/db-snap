@@ -34,7 +34,40 @@ their dependencies. Never fall back to exporting the original snapshot when
 sanitization fails. Cover composite keys and related tables before extending
 the design to server dumps.
 
-## v0.4.2 design proposals
+## v0.4.3 planned scope
+
+- [x] Add `dbsnap tag <snapshot> <new-tag>` and optional `save -m` notes.
+  Keep tags unique and preserve compatibility with existing catalogs and
+  archives. Limit note length and keep output subject to credential redaction.
+- [x] Add `dbsnap rm <snapshot>`. Protect pinned snapshots and reuse the
+  catalog lock and pending garbage collection. Preserve SQLite chunks that
+  other snapshots still reference.
+- [x] Show the latest snapshot in `status` and optionally record its Git
+  branch at capture time. Git metadata must be optional and work with Git
+  worktrees. Keep the default status cheap.
+- [x] Add opt-in `diff-live --ephemeral` with recoverable cleanup on failure
+  or interruption. Keep existing `diff-live` checkpoint behavior by default
+  and return only references that callers can still use.
+
+- [x] Run live CLI and MCP smoke tests on SQLite and disposable PostgreSQL,
+  MySQL, and MariaDB databases.
+- [ ] Complete hosted CI and package verification for v0.4.3.
+
+## Follow-up designs in the v0.4 series
+
+An opt-in status comparison should report what was checked. Schema and row
+counts can report differences or no differences detected, but cannot prove
+row contents match. SQLite comparison must use a consistent view with WAL
+data included. Benchmark the cost before making any latency claims.
+
+`save --amend` requires a defined policy for pinned snapshots and references
+to the old ID. Commit the replacement before scheduling old artifact cleanup,
+and preserve the old restore point when capture or catalog commit fails.
+
+Extend sandbox removal to SQLite and PostgreSQL after proving ownership of
+the current resource. A registered path or database name alone cannot prove
+that a resource was not replaced. Keep legacy resources on manual cleanup
+when ownership cannot be established.
 
 `dbsnap rehearse` would take a snapshot selector and an explicit migration
 command. It would create a sandbox, pass the sandbox connection to that
@@ -42,6 +75,9 @@ command, and collect a bounded report with the migration exit code and
 before/after snapshot IDs. The first version should support engines where
 dbsnap can pass a usable sandbox connection. MySQL/MariaDB Docker sandboxes
 currently have no host endpoint and need a separate execution design.
+Passing a sandbox URL does not constrain an arbitrary child process. Treat
+commands as trusted unless runtime isolation enforces database access. Keep
+MCP execution and automatic cleanup as separate design decisions.
 
 `dbsnap deployment-check` would read a rehearsal report and apply explicit
 schema-change policies. It should distinguish a policy failure from an

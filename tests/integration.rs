@@ -239,6 +239,77 @@ fn verify_doctor_exec_and_mcp_report_real_state() -> Result<()> {
 }
 
 #[test]
+fn snapshot_annotations_tag_and_remove_through_cli() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "baseline")?;
+    let cli = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+            .current_dir(&root)
+            .env("DATABASE_URL", &db)
+            .args(args)
+            .output()
+    };
+    assert!(cli(&["save", "before", "-m", "Before migration"])?
+        .status
+        .success());
+    let status = cli(&["status", "--json"])?;
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(status["latest"]["tag"], "before");
+    assert_eq!(status["latest"]["message"], "Before migration");
+    assert!(!cli(&["tag", "before", "baseline"])?.status.success());
+    assert!(cli(&["tag", "before", "renamed"])?.status.success());
+    assert!(cli(&["pin", "renamed"])?.status.success());
+    assert!(!cli(&["rm", "renamed"])?.status.success());
+    assert!(cli(&["unpin", "renamed"])?.status.success());
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    fs::write(store.root.join("postgres-restore.json"), "{}")?;
+    assert!(!cli(&["rm", "renamed"])?.status.success());
+    fs::remove_file(store.root.join("postgres-restore.json"))?;
+    assert!(cli(&["rm", "renamed"])?.status.success());
+    assert_eq!(store.load_metadata()?.snapshots.len(), 1);
+    ops::verify_at(&root, db.to_str(), Some("baseline"))?;
+    Ok(())
+}
+
+#[test]
+fn ephemeral_live_diff_keeps_catalog_clean_and_retries_gc() -> Result<()> {
+    let root = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "baseline")?;
+    rusqlite::Connection::open(&db)?.execute_batch("CREATE TABLE migrated (id INTEGER)")?;
+    let output = ops::diff_live_ephemeral_at(&root, db.to_str(), "baseline")?;
+    let report: serde_json::Value = serde_json::from_str(&output)?;
+    assert_eq!(report["live_snapshot_retained"], false);
+    assert!(report.get("live_snapshot_id").is_none());
+    assert!(report["comparison"].as_str().unwrap().contains("migrated"));
+    let store = dbsnap::storage::Storage::find(&root).unwrap();
+    let meta = store.load_metadata()?;
+    assert_eq!(meta.snapshots.len(), 1);
+    assert!(meta.pending_gc.is_empty());
+
+    let failed = std::process::Command::new(env!("CARGO_BIN_EXE_dbsnap"))
+        .current_dir(&root)
+        .env("DATABASE_URL", &db)
+        .env("DBSNAP_TEST_FAILPOINT", "ephemeral_after_metadata")
+        .args(["diff-live", "baseline", "--ephemeral"])
+        .output()?;
+    assert!(!failed.status.success());
+    let meta = store.load_metadata()?;
+    assert_eq!(meta.snapshots.len(), 1);
+    assert_eq!(meta.pending_gc.len(), 1);
+    ops::prune_at(&root, db.to_str(), 1)?;
+    assert!(store.load_metadata()?.pending_gc.is_empty());
+    ops::verify_at(&root, db.to_str(), Some("baseline"))?;
+    Ok(())
+}
+
+#[test]
 fn prune_interruption_keeps_recorded_gc_queue_for_retry() -> Result<()> {
     let root = temp_root();
     let db = root.join("dev.db");
@@ -1135,6 +1206,8 @@ fn legacy_file_snapshot_still_restorable() -> Result<()> {
         blake3: hash,
         method: "sqlite-backup".into(),
         pinned: false,
+        message: None,
+        git_branch: None,
         source_state: None,
     });
     store.write_metadata(&meta)?;

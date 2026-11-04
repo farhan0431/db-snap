@@ -182,6 +182,8 @@ pub fn import_at(
             blake3: header.hash,
             method: method.into(),
             pinned: false,
+            message: None,
+            git_branch: None,
             source_state: None,
         });
         if let Err(error) = ctx.store.write_metadata(&meta) {

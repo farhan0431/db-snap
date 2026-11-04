@@ -86,6 +86,10 @@ pub struct SnapshotRecord {
     #[serde(default)]
     pub pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_state: Option<SourceState>,
 }
 
@@ -490,6 +494,8 @@ mod tests {
             blake3: "x".into(),
             method: "sqlite-backup".into(),
             pinned: false,
+            message: None,
+            git_branch: None,
             source_state: None,
         });
         assert_eq!(meta.find(Some("a1")).unwrap().id, "a1b2c3");

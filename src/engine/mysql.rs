@@ -333,6 +333,8 @@ impl MysqlEngine {
                             blake3: hash,
                             method: "mysql-dump".to_string(),
                             pinned: false,
+                            message: None,
+                            git_branch: None,
                             source_state: None,
                         },
                         linked: false,

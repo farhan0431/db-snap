@@ -133,6 +133,9 @@ file; review it against the repository's current skill when upgrading.
 | `dbsnap init` | Bind the project to a database. |
 | `dbsnap status` | Check the database and snapshot storage. |
 | `dbsnap save [tag]` | Create a snapshot; the tag is optional. |
+| `dbsnap save before -m "Before migration" --git-branch` | Save with a local note and record the Git branch when available. |
+| `dbsnap tag before baseline` | Rename a snapshot tag. |
+| `dbsnap rm baseline` | Remove a single unpinned snapshot. |
 | `dbsnap list` | List snapshot IDs and tags. |
 | `dbsnap restore [tag-or-id]` | Restore a snapshot; omit the selector for the latest. |
 | `dbsnap rollback` | Restore the latest snapshot. |
@@ -147,6 +150,7 @@ file; review it against the repository's current skill when upgrading.
 | `dbsnap recover` | Resume the recovery journal; ambiguous PostgreSQL states require inspection. |
 | `dbsnap exec -- npm run db:migrate` | Checkpoint before a child command; retain it on failure, with no automatic rollback. |
 | `dbsnap diff-live before` | Capture and retain the current state, then compare. |
+| `dbsnap diff-live before --ephemeral` | Compare without retaining a restore point. |
 | `dbsnap diff-rows before after --table users` | Bounded row-change counts by primary key, default limit 10,000 rows. v0.4.1 adds server preview and Git-style output. |
 | `dbsnap sandbox before --output experiment.db` | Fork SQLite into a new file; existing files are never overwritten. |
 | `dbsnap sandbox before` | Create an independent PostgreSQL clone, recorded in `sandboxes.json`. |

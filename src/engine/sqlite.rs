@@ -300,6 +300,8 @@ impl DatabaseEngine for SqliteEngine {
                     blake3: content_id,
                     method: "sqlite-delta".to_string(),
                     pinned: false,
+                    message: None,
+                    git_branch: None,
                     source_state: current_state,
                 },
                 linked: false,

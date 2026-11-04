@@ -228,6 +228,9 @@ dbsnap restore "before-migration"
 dbsnap rollback                 # restore the most recent snapshot
 dbsnap prune --keep 5           # keep only the 5 newest
 dbsnap status                   # binding, engine info, disk usage
+dbsnap save baseline -m "Before migration" --git-branch
+dbsnap tag baseline before-migration
+dbsnap rm before-migration      # remove one unpinned snapshot
 dbsnap list --json              # machine-readable snapshot catalog
 dbsnap status --json            # machine-readable database status
 dbsnap diff before after        # compare supported snapshots
@@ -238,6 +241,7 @@ dbsnap doctor                  # diagnose connection, recovery and untracked fil
 dbsnap recover                 # recover using a server restore journal
 dbsnap exec -- npm run db:migrate # checkpoint before a command; no automatic rollback
 dbsnap diff-live before         # capture/retain live checkpoint and compare
+dbsnap diff-live before --ephemeral # compare without keeping a restore point
 dbsnap diff-rows before after --table users # bounded primary-key row-change counts
 dbsnap diff-rows before after --table users --format git --show-values
 dbsnap diff-rows before after --table users --column role --key-min 100 --key-max 199
@@ -248,6 +252,18 @@ dbsnap sandbox before --output ./experiment.db # new independent SQLite file
 dbsnap sandbox-list             # recorded sandboxes and their current state
 dbsnap sandbox-remove CONTAINER_ID # remove an owned Docker sandbox
 ```
+
+Status shows the latest restore point. `--git-branch` records the branch
+at save time when Git is installed and HEAD points to a branch. Notes are
+local catalog metadata, visible through `status` (for the latest snapshot)
+and `list --json`. Keep secrets out of notes.
+
+The CLI's `diff-live --ephemeral` still captures a temporary artifact and
+can briefly fence PostgreSQL connections in clone mode. If cleanup was
+interrupted after the artifact was recorded, check `doctor` and run
+`dbsnap prune --keep N` with `N` at least the current snapshot count to
+retry cleanup without pruning active snapshots. An interruption before the
+catalog commit can leave an untracked artifact for manual inspection.
 
 `diff` supports SQLite snapshots, PostgreSQL server-side clone snapshots, and
 standard MySQL/MariaDB dump snapshots created by dbsnap.
