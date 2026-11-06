@@ -61,7 +61,11 @@ the design to server dumps.
 - [x] Document command privileges, retained resources and unsupported engines.
 - [x] Verify success, policy failure, command failure, timeout and approval denial through CLI/MCP.
 - [x] Verify live PostgreSQL and MySQL/MariaDB compatibility.
-- [ ] Complete hosted CI, six release builds and published npm installation.
+- [x] Complete hosted CI, six release builds and packed npm verification.
+
+The [pre-release verification](https://github.com/farhan0431/db-snap/actions/runs/42169902179)
+passed all 16 jobs at `88e9e15`. Verify installation from the public npm
+registry after tag publication.
 
 ## Follow-up designs in the v0.4 series
 

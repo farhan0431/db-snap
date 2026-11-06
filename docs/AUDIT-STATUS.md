@@ -25,6 +25,10 @@ These tests do not establish isolation for arbitrary commands.
 Release validation results are tracked in the maintainer roadmap. This addition
 does not resolve the historical audit findings below.
 
+The [v0.4.4 pre-release run](https://github.com/farhan0431/db-snap/actions/runs/42169902179)
+passed all nine verification jobs, six release builds and the packed npm
+installation/CLI/MCP test at `88e9e15`.
+
 This tracks the supplied static audit against the current development branch.
 It is not a security certification. Restore and fault-injection tests must use
 disposable databases; dbsnap is not a production backup system.
