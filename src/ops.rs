@@ -11,6 +11,8 @@ use std::path::Path;
 mod health;
 #[path = "portable.rs"]
 mod portable;
+#[path = "rehearse.rs"]
+mod rehearse;
 #[path = "rows.rs"]
 mod rows;
 pub use health::{
@@ -18,6 +20,7 @@ pub use health::{
     sandbox_at, sandbox_list_at, sandbox_remove_at, verify_at, verify_with,
 };
 pub use portable::{export_at, import_at};
+pub use rehearse::{rehearse_at, rehearse_exit_code, rehearse_with, RehearseOptions};
 pub use rows::{
     diff_rows_at, diff_rows_options_at, diff_rows_options_with, diff_rows_with, RowOptions,
 };

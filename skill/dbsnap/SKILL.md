@@ -106,6 +106,16 @@ within the user's authorized scope.
   Prune works on recorded artifacts and retries pending cleanup. Leave
   untracked artifacts and journals intact while diagnosing an error.
 
+For v0.4.4 migration rehearsal, use `dbsnap rehearse SNAPSHOT -- COMMAND ARGS`
+or the advertised `dbsnap_rehearse` tool. SQLite and PostgreSQL are supported.
+Check that the trusted command uses the injected sandbox connection. It
+retains the sandbox and before/after artifacts for inspection, discards child
+output, and reports migration, timeout, infrastructure and policy outcomes.
+Review `status` in the report and preserve failed/incomplete runs. A passed
+table-drop check does not establish deployment safety. MCP rehearsal needs
+session enablement and per-call approval because it executes a host program
+without OS isolation. MySQL/MariaDB rehearsal is unsupported.
+
 For migration rehearsal, target development or staging. Keep production
 rollout and production backup and recovery in the existing deployment and
 database systems.

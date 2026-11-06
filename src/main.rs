@@ -21,6 +21,31 @@ fn run(command: Command) -> i32 {
     };
 
     let result = match command {
+        Command::Rehearse {
+            snapshot,
+            db,
+            fail_on_drop_table,
+            timeout_seconds,
+            command,
+        } => {
+            match ops::rehearse_at(
+                &root,
+                db.as_deref(),
+                &snapshot,
+                &ops::RehearseOptions {
+                    command,
+                    timeout_seconds,
+                    fail_on_drop_table,
+                },
+            ) {
+                Ok(report) => {
+                    let value = serde_json::from_str(&report).unwrap_or_default();
+                    println!("{report}");
+                    return ops::rehearse_exit_code(&value);
+                }
+                Err(error) => Err(error),
+            }
+        }
         Command::DiffReport {
             from,
             to,

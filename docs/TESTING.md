@@ -1,5 +1,12 @@
 # Verification and regression coverage
 
+The live `scripts/test-cli-mcp.py` suite also exercises v0.4.4 rehearsal
+success, dropped-table policy, migrator failure, timeout, missing executable,
+retained reports, source schema/count preservation, and MCP approval/denial
+on SQLite and PostgreSQL. MySQL/MariaDB verifies that rehearsal is rejected.
+The script cleans only resources recorded by its disposable QA project.
+Use the [rehearsal guide](REHEARSE.md) for the runtime contract.
+
 Tests operate on disposable databases. CLI and MCP verification uses actual
 processes; the stdio tests exchange JSON-RPC, respond to elicitation requests,
 and assert database row counts rather than only checking exit codes.

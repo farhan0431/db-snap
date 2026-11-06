@@ -224,7 +224,7 @@ pub fn sandbox_at(
     })())
 }
 
-fn sandbox_registry(store: &Storage) -> Result<Vec<Value>> {
+pub(super) fn sandbox_registry(store: &Storage) -> Result<Vec<Value>> {
     match fs::read(store.root.join("sandboxes.json")) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes).context("reading sandbox registry")?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),

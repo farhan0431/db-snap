@@ -11,6 +11,39 @@ pub(super) fn row_diff_replays(args: &Value) -> bool {
     args["replay_dumps"] == true || args.get("docker_image").is_some()
 }
 
+pub(super) fn rehearse_request(args: &Value) -> anyhow::Result<(String, ops::RehearseOptions)> {
+    let selector = args["snapshot"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("snapshot must be a string"))?;
+    let command = args["command"]
+        .as_array()
+        .and_then(|args| {
+            args.iter()
+                .map(|arg| arg.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| anyhow::anyhow!("command must be an array of strings"))?;
+    let timeout_seconds = match args.get("timeout_seconds") {
+        None => 60,
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("timeout_seconds must be an integer"))?,
+    };
+    let fail_on_drop_table = match args.get("fail_on_drop_table") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("fail_on_drop_table must be a boolean"))?,
+    };
+    let options = ops::RehearseOptions {
+        command,
+        timeout_seconds,
+        fail_on_drop_table,
+    };
+    options.validate()?;
+    Ok((selector.to_owned(), options))
+}
+
 pub fn handle_with_policy(ctx: &Ctx, msg: &Value, allow_destructive: bool) -> Option<Value> {
     let method = msg.get("method")?.as_str()?;
     let id = msg.get("id").cloned();
@@ -26,7 +59,7 @@ pub fn handle_with_policy(ctx: &Ctx, msg: &Value, allow_destructive: bool) -> Op
             "protocolVersion": negotiated_version(msg),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "dbsnap", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "dbsnap provides checkpoints for local development databases. Check dbsnap_status, save before risky changes, and retain the exact snapshot_id from structuredContent.data. Verify checks artifact integrity/existence, not restore success. Doctor diagnoses journals and untracked files without applying recovery. Live diff creates a retained checkpoint; row preview returns counts, with explicit opt-in for trusted dump replay. Restore/prune require authorized destructive sessions and per-call elicitation. Stop MySQL writers/events first, and preserve recovery journals and pinned snapshots on failure."
+            "instructions": "dbsnap provides checkpoints for local development databases. Check dbsnap_status, save before risky changes, and retain the exact snapshot_id from structuredContent.data. Verify checks artifact integrity/existence, not restore success. Doctor diagnoses journals and untracked files without applying recovery. Live diff creates a retained checkpoint; row preview returns counts, with explicit opt-in for trusted dump replay. Restore/prune and trusted rehearsal commands require authorized destructive sessions and per-call elicitation. Rehearsal retains sandbox artifacts and is not OS isolation. Stop MySQL writers/events first, and preserve recovery journals and pinned snapshots on failure."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": schema::tools() })),
@@ -60,11 +93,23 @@ fn tools_call(
     let name = params["name"].as_str().unwrap_or_default().to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    if !allow_destructive && matches!(name.as_str(), "dbsnap_restore_snapshot" | "dbsnap_prune") {
+    if !allow_destructive
+        && matches!(
+            name.as_str(),
+            "dbsnap_restore_snapshot" | "dbsnap_prune" | "dbsnap_rehearse"
+        )
+    {
         return Ok(error_result("destructive MCP tools are disabled; explicitly start the server with --allow-destructive to enable them"));
     }
 
     let tool_result: Result<String, anyhow::Error> = match name.as_str() {
+        "dbsnap_rehearse" => match rehearse_request(&args) {
+            Ok((selector, options)) => {
+                let cwd = ctx.store.root.parent().unwrap_or(&ctx.store.root);
+                ops::rehearse_with(ctx, cwd, &selector, &options)
+            }
+            Err(error) => Err(error),
+        },
         "dbsnap_create_snapshot" => {
             let tag = match args.get("tag") {
                 None => None,
@@ -182,17 +227,24 @@ fn tools_call(
         }
         other => {
             return Ok(error_result(&format!(
-                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_diff, dbsnap_prune, dbsnap_status, dbsnap_verify, dbsnap_doctor, dbsnap_diff_live, dbsnap_diff_rows"
+                "unknown tool: {other} — available: dbsnap_create_snapshot, dbsnap_restore_snapshot, dbsnap_list_snapshots, dbsnap_diff, dbsnap_prune, dbsnap_status, dbsnap_verify, dbsnap_doctor, dbsnap_diff_live, dbsnap_diff_rows, dbsnap_rehearse"
             )));
         }
     };
 
     Ok(match tool_result {
-        Ok(text) => json!({
-            "content": [ { "type": "text", "text": crate::util::mask(&text) } ],
-            "isError": false,
-            "structuredContent": {"ok":true,"operation":name,"message":crate::util::mask(&text),"data":serde_json::from_str::<Value>(&crate::util::mask(&text)).ok()}
-        }),
+        Ok(text) => {
+            let data = serde_json::from_str::<Value>(&crate::util::mask(&text)).ok();
+            let failed = name == "dbsnap_rehearse"
+                && data
+                    .as_ref()
+                    .map_or(true, |report| ops::rehearse_exit_code(report) != 0);
+            json!({
+                "content": [ { "type": "text", "text": crate::util::mask(&text) } ],
+                "isError": failed,
+                "structuredContent": {"ok":!failed,"operation":name,"message":crate::util::mask(&text),"data":data}
+            })
+        }
         Err(e) => json!({
             "content": [ { "type": "text", "text": crate::util::mask(&format!("Error: {e:#}")) } ],
             "isError": true,

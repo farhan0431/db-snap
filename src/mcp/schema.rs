@@ -77,6 +77,7 @@ pub fn tools() -> Value {
         }
     ]);
     tools.as_array_mut().unwrap().extend([
+        json!({"name":"dbsnap_rehearse","description":"Run an explicitly supplied trusted command against a retained SQLite/PostgreSQL sandbox, then report schema/count changes and optional dropped-table policy. Requires an authorized session and per-call approval. No OS isolation; commands can ignore the injected connection. Child output is discarded. MySQL/MariaDB unsupported.","inputSchema":{"type":"object","properties":{"snapshot":{"type":"string"},"command":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"string","maxLength":8192}},"timeout_seconds":{"type":"integer","minimum":1,"maximum":600},"fail_on_drop_table":{"type":"boolean"}},"required":["snapshot","command"],"additionalProperties":false}}),
         json!({"name":"dbsnap_diff_rows","description":"Bounded row-change counts by primary key without returning values. PostgreSQL dumps require explicit replay_dumps for trusted SQL. MySQL/MariaDB requires an explicit Docker image and trusted dumps.","inputSchema":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"table":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100000},"columns":{"type":"array","items":{"type":"string"}},"key_min":{"type":"integer"},"key_max":{"type":"integer"},"replay_dumps":{"type":"boolean"},"docker_image":{"type":"string","enum":["mysql:8.0","mariadb:11"]}},"required":["from","to","table"],"additionalProperties":false}}),
         json!({"name":"dbsnap_diff_live","description":"Capture and retain a regular snapshot of current state, then compare it with from. Creates artifacts; PostgreSQL briefly fences connections. Does not compare individual row contents.","inputSchema":{"type":"object","properties":{"from":{"type":"string"}},"required":["from"],"additionalProperties":false}}),
         json!({"name":"dbsnap_verify","description":"Check snapshot hashes/sizes/chunks or PostgreSQL clone existence without replaying SQL. Does not prove restore success.","inputSchema":{"type":"object","properties":{"tag_or_id":{"type":"string"}},"additionalProperties":false}}),
@@ -87,7 +88,7 @@ pub fn tools() -> Value {
         // Existing status/list/diff may invoke PostgreSQL journal healing in
         // their shared context; do not claim read-only semantics for them.
         tool["annotations"] = json!({"readOnlyHint":matches!(name.as_str(),"dbsnap_verify"|"dbsnap_doctor"),
-            "destructiveHint":matches!(name.as_str(),"dbsnap_restore_snapshot"|"dbsnap_prune"),"openWorldHint":false});
+            "destructiveHint":matches!(name.as_str(),"dbsnap_restore_snapshot"|"dbsnap_prune"|"dbsnap_rehearse"),"openWorldHint":name=="dbsnap_rehearse"});
         tool["outputSchema"] = json!({"type":"object","properties":{"ok":{"type":"boolean"},"operation":{"type":"string"},"message":{"type":"string"},"code":{"type":"string"},"data":{}},"required":["ok","message"]});
     }
     tools

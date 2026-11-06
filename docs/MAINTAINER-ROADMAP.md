@@ -51,7 +51,17 @@ the design to server dumps.
 
 - [x] Run live CLI and MCP smoke tests on SQLite and disposable PostgreSQL,
   MySQL, and MariaDB databases.
-- [ ] Complete hosted CI and package verification for v0.4.3.
+- [x] Complete hosted CI and package verification for v0.4.3.
+
+## v0.4.4 rehearsal
+
+- [x] Implement retained SQLite/PostgreSQL sandboxes and before/after reports.
+- [x] Execute explicit trusted argv with migration timeout and sandbox connection.
+- [x] Require MCP session enablement and per-call approval.
+- [x] Document command privileges, retained resources and unsupported engines.
+- [x] Verify success, policy failure, command failure, timeout and approval denial through CLI/MCP.
+- [x] Verify live PostgreSQL and MySQL/MariaDB compatibility.
+- [ ] Complete hosted CI, six release builds and published npm installation.
 
 ## Follow-up designs in the v0.4 series
 
@@ -69,12 +79,9 @@ the current resource. A registered path or database name alone cannot prove
 that a resource was not replaced. Keep legacy resources on manual cleanup
 when ownership cannot be established.
 
-`dbsnap rehearse` would take a snapshot selector and an explicit migration
-command. It would create a sandbox, pass the sandbox connection to that
-command, and collect a bounded report with the migration exit code and
-before/after snapshot IDs. The first version should support engines where
-dbsnap can pass a usable sandbox connection. MySQL/MariaDB Docker sandboxes
-currently have no host endpoint and need a separate execution design.
+`dbsnap rehearse` now supports SQLite/PostgreSQL with retained sandboxes
+and bounded reports. MySQL/MariaDB Docker sandboxes currently have no host
+endpoint and need a separate execution design.
 Passing a sandbox URL does not constrain an arbitrary child process. Treat
 commands as trusted unless runtime isolation enforces database access. Keep
 MCP execution and automatic cleanup as separate design decisions.

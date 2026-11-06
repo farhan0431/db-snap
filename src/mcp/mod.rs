@@ -52,9 +52,11 @@ pub fn run(explicit_db: Option<&str>, allow_destructive: bool) -> Result<()> {
                 let name = msg["params"]["name"].as_str().unwrap_or("");
                 let destructive = msg["method"] == "tools/call"
                     && msg.get("id").is_some()
-                    && (matches!(name, "dbsnap_restore_snapshot" | "dbsnap_prune")
-                        || (name == "dbsnap_diff_rows"
-                            && handler::row_diff_replays(&msg["params"]["arguments"])));
+                    && (matches!(
+                        name,
+                        "dbsnap_restore_snapshot" | "dbsnap_prune" | "dbsnap_rehearse"
+                    ) || (name == "dbsnap_diff_rows"
+                        && handler::row_diff_replays(&msg["params"]["arguments"])));
                 if destructive && allow_destructive {
                     let request_id = msg["id"].clone();
                     let preparation = if name == "dbsnap_restore_snapshot" {
@@ -69,6 +71,12 @@ pub fn run(explicit_db: Option<&str>, allow_destructive: bool) -> Result<()> {
                         selector.and_then(|selector| ops::resolve_restore_id(&ctx, selector)).map(|id| {
                             msg["params"]["arguments"]["tag_or_id"] = json!(id);
                             format!("Restore database {} to snapshot {}? Current data will be replaced.", ctx.db.display(), id)
+                        })
+                    } else if name == "dbsnap_rehearse" {
+                        handler::rehearse_request(&msg["params"]["arguments"]).and_then(|(selector, options)| {
+                            let id = ops::resolve_restore_id(&ctx, Some(&selector))?;
+                            msg["params"]["arguments"]["snapshot"] = json!(id);
+                            Ok(format!("Run trusted migration command {:?} against a retained sandbox from snapshot {}? Timeout {} seconds. The command has this computer's user privileges and may ignore the sandbox connection.", options.command, id, options.timeout_seconds))
                         })
                     } else if name == "dbsnap_diff_rows" {
                         Ok(format!("Replay trusted snapshot SQL into temporary sandboxes for a row preview of {}?", ctx.db.display()))

@@ -240,6 +240,7 @@ dbsnap verify                  # check active snapshot artifact integrity
 dbsnap doctor                  # diagnose connection, recovery and untracked files
 dbsnap recover                 # recover using a server restore journal
 dbsnap exec -- npm run db:migrate # checkpoint before a command; no automatic rollback
+dbsnap rehearse before --fail-on-drop-table -- npx prisma migrate deploy
 dbsnap diff-live before         # capture/retain live checkpoint and compare
 dbsnap diff-live before --ephemeral # compare without keeping a restore point
 dbsnap diff-rows before after --table users # bounded primary-key row-change counts
@@ -358,7 +359,14 @@ Add to your MCP config (`.cursor/mcp.json`, Claude Desktop, Windsurf, …):
 
 or without a global install: `"command": "npx", "args": ["-y", "@farhan0431/db-snap", "mcp"]`.
 
-The current source server exposes ten tools:
+v0.4.4 adds `dbsnap rehearse` for trusted migration commands on retained
+SQLite/PostgreSQL sandboxes, with timeout and JSON policy reports.
+Check that the migrator uses its injected sandbox connection. Commands run
+with the user's privileges. MySQL/MariaDB rehearsal is pending, and sandbox
+cleanup is manual. See [migration rehearsal](docs/REHEARSE.md) for exit codes,
+connection variables, MCP approval and cleanup.
+
+The current source server exposes eleven tools:
 
 Restore and prune are disabled by default in MCP. An operator can enable them
 for a server session by adding `--allow-destructive` to the MCP command arguments.
@@ -376,6 +384,7 @@ elicitation. Clients without elicitation support cannot invoke these operations.
 | `dbsnap_verify` | Check artifact integrity or clone existence without replaying SQL. |
 | `dbsnap_doctor` | Diagnose connections, journals, pending GC and untracked files. |
 | `dbsnap_diff_live` | Save and retain a live checkpoint, then compare it with `from`. |
+| `dbsnap_rehearse` | Run an approved trusted migration command on a retained SQLite/PostgreSQL sandbox and report changes. |
 | `dbsnap_diff_rows` | Bounded added/removed/updated counts by primary key. Trusted dump replay requires explicit options. |
 
 Tool results retain text and add `structuredContent` with `ok`, `message`,

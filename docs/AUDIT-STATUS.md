@@ -1,5 +1,30 @@
 # Audit status for the 2026-11-03 report
 
+## v0.4.4 rehearsal audit — 2026-11-06
+
+Rehearsal executes explicitly supplied trusted programs. The injected
+connection does not constrain a program's filesystem, network or database
+access. Source-server PostgreSQL privileges remain available to the child.
+MCP requires session enablement and per-call approval pinned to an exact
+snapshot ID and the command argv.
+
+Sandbox files/databases and before/after snapshots are retained. Automatic
+deletion is deferred until current resource ownership can be verified.
+Reports are persisted before command execution, contain no credentials or
+child logs, and distinguish policy, command, timeout and infrastructure
+failures. Captures and diff have no overall timeout. Detached children and
+process-kill cleanup remain limitations. A crash before registration can
+leave an untracked resource. MySQL/MariaDB rehearsal is rejected.
+
+Local Rust checks and live CLI/MCP smoke tests passed on SQLite,
+PostgreSQL, MySQL and MariaDB. The server tests verify the retained-sandbox
+scope and explicit MySQL/MariaDB rejection for rehearsal. Source schema and
+row-count assertions cover the supplied cooperative migration commands.
+These tests do not establish isolation for arbitrary commands.
+
+Release validation results are tracked in the maintainer roadmap. This addition
+does not resolve the historical audit findings below.
+
 This tracks the supplied static audit against the current development branch.
 It is not a security certification. Restore and fault-injection tests must use
 disposable databases; dbsnap is not a production backup system.

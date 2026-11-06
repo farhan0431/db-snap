@@ -183,6 +183,47 @@ def main():
             assert ephemeral["live_snapshot_retained"] is False
             assert "live_snapshot_id" not in ephemeral and "extra" in ephemeral["comparison"]
             assert json.loads(cli("list", "--json")) == catalog
+            if options.engine != "mysql":
+                def migration(query):
+                    if options.engine == "sqlite":
+                        return [sys.executable, "-c",
+                                "import sqlite3,os; c=sqlite3.connect(os.environ['DBSNAP_SANDBOX_DB']); "
+                                f"c.executescript({query!r}); c.close()"]
+                    return [sys.executable, "-c",
+                            "import subprocess; subprocess.run(['psql','-X','-w','-v','ON_ERROR_STOP=1',"
+                            f"'-c',{query!r}],check=True)"]
+
+                def rehearsal(command, expected=0, extra=()):
+                    result = subprocess.run(
+                        [str(binary), "rehearse", "before", "--db", url, *extra, "--", *command],
+                        cwd=root, capture_output=True, text=True, timeout=120)
+                    assert result.returncode == expected, result.stderr + result.stdout
+                    report = json.loads(result.stdout)
+                    # Short QA passwords can also occur in temp paths and are
+                    # deliberately masked in output and persisted reports.
+                    persisted = [json.loads(path.read_text()) for path in
+                                 (root / ".dbsnap" / "rehearsals").glob("*/report.json")]
+                    assert report in persisted and report["sandbox_retained"], report
+                    assert rows() == 2
+                    if options.engine == "sqlite":
+                        assert sql("SELECT COUNT(*) FROM sqlite_master WHERE type='table'") == "2"
+                    else:
+                        assert sql("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public'") == "2"
+                    return report
+
+                report = rehearsal(migration("CREATE TABLE rehearsal_probe(id INT)"))
+                assert report["status"] == "passed" and "rehearsal_probe" in report["summary"]
+                report = rehearsal(migration("DROP TABLE items"), expected=3,
+                                   extra=("--fail-on-drop-table",))
+                assert report["status"] == "policy_failed" and report["policy"]["violated"]
+                report = rehearsal([sys.executable, "-c", "raise SystemExit(7)"], expected=4)
+                assert report["command_exit_code"] == 7 and report["status"] == "command_failed"
+                report = rehearsal([sys.executable, "-c", "import time; time.sleep(15)"],
+                                   expected=5, extra=("--timeout-seconds", "1"))
+                assert report["timed_out"] and report["status"] == "timed_out"
+                report = rehearsal(["dbsnap-nonexistent-qa-command"], expected=1)
+                assert report["status"] == "infrastructure_failed"
+                assert json.loads(cli("list", "--json")) == catalog
             assert json.loads(cli("verify"))["ok"]
             assert json.loads(cli("doctor"))["mutations_performed"] is False
             command_result = json.loads(cli("exec", "--", sys.executable, "-c", "print('checkpoint child')"))
@@ -445,7 +486,8 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
             session = Mcp(binary, root, url, False)
             try:
                 tools = session.call("tools/list", {})["result"]["tools"]
-                assert len(tools) == 10
+                assert len(tools) == 11
+                session.tool("dbsnap_rehearse", {"snapshot": "before", "command": [sys.executable, "-c", "raise SystemExit(9)"]}, error=True)
                 verified = json.loads(cli("verify"))
                 assert verified["ok"]
                 assert json.loads(cli("doctor"))["mutations_performed"] is False
@@ -478,6 +520,19 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
 
             session = Mcp(binary, root, url, True)
             try:
+                args = {"snapshot": "before", "command": [sys.executable, "-c", "raise SystemExit(9)"]}
+                runs = set((root / ".dbsnap" / "rehearsals").glob("*"))
+                session.tool("dbsnap_rehearse", args, error=True, approve=False)
+                assert set((root / ".dbsnap" / "rehearsals").glob("*")) == runs
+                if options.engine != "mysql":
+                    args["command"] = migration("CREATE TABLE mcp_rehearsal_probe(id INT)")
+                    report = json.loads(session.tool("dbsnap_rehearse", args))
+                    assert report["status"] == "passed" and rows() == 3
+                    args["command"] = [sys.executable, "-c", "raise SystemExit(9)"]
+                    report = json.loads(session.tool("dbsnap_rehearse", args, error=True))
+                    assert report["status"] == "command_failed" and report["command_exit_code"] == 9
+                else:
+                    session.tool("dbsnap_rehearse", args, error=True)
                 if options.engine == "mysql" and options.docker_sandbox:
                     args = {"from": "before", "to": live["live_snapshot_id"], "table": "items",
                             "docker_image": image, "columns": ["value"], "key_min": 2,
@@ -506,6 +561,24 @@ os.execv(os.environ['DBSNAP_QA_REAL_DUMP'], [os.environ['DBSNAP_QA_REAL_DUMP']] 
             print(f"PASS {options.engine}: CLI/MCP including verify/doctor, approval/denial, JSON, diff, prune and data assertions")
         finally:
             if created:
+                if options.engine == "postgres":
+                    # Only this temporary QA project's recorded resources.
+                    owned = set()
+                    registry = root / ".dbsnap" / "sandboxes.json"
+                    if registry.exists():
+                        owned.update(entry["name"] for entry in json.loads(registry.read_text())
+                                     if entry.get("engine") == "postgres")
+                    catalogs = [root / ".dbsnap" / "metadata.json",
+                                *(root / ".dbsnap" / "rehearsals").glob("*/.dbsnap/metadata.json")]
+                    for catalog_path in catalogs:
+                        if not catalog_path.exists():
+                            continue
+                        catalog = json.loads(catalog_path.read_text())
+                        owned.update(s["location"]["name"] for s in catalog["snapshots"]
+                                     if s["location"]["kind"] == "pg_database")
+                    for resource in owned:
+                        assert resource.startswith("__dbsnap_") and resource.replace("_", "").isalnum()
+                        sql(f'DROP DATABASE IF EXISTS "{resource}"', admin=True)
                 sql(f"DROP DATABASE {quoted}", admin=True)
 
 

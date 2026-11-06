@@ -309,6 +309,32 @@ fn ephemeral_live_diff_keeps_catalog_clean_and_retries_gc() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn rehearsal_rejects_a_symlink_workspace_before_writing_outside_catalog() -> Result<()> {
+    let root = temp_root();
+    let outside = temp_root();
+    let db = root.join("dev.db");
+    create_db(&db, 1);
+    init(&root, &db)?;
+    save(&root, &db, "baseline")?;
+    std::os::unix::fs::symlink(&outside, root.join(".dbsnap/rehearsals"))?;
+    let result = ops::rehearse_at(
+        &root,
+        db.to_str(),
+        "baseline",
+        &ops::RehearseOptions {
+            command: vec![env!("CARGO_BIN_EXE_dbsnap").into(), "--version".into()],
+            timeout_seconds: 1,
+            fail_on_drop_table: false,
+        },
+    );
+    assert!(format!("{:#}", result.unwrap_err()).contains("real directory"));
+    assert_eq!(fs::read_dir(&outside)?.count(), 0);
+    assert_eq!(count_rows(&db), 1);
+    Ok(())
+}
+
 #[test]
 fn prune_interruption_keeps_recorded_gc_queue_for_retry() -> Result<()> {
     let root = temp_root();

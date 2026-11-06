@@ -15,6 +15,19 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Run a trusted migration command against a retained SQLite/PostgreSQL sandbox
+    Rehearse {
+        snapshot: String,
+        #[arg(long)]
+        db: Option<String>,
+        #[arg(long)]
+        fail_on_drop_table: bool,
+        /// Maximum migration runtime (sandbox capture and diff are separate)
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=600))]
+        timeout_seconds: u64,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Produce a bounded JSON schema diff for CI
     DiffReport {
         from: String,

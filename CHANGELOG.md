@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-11-06
+
+### Added
+
+- `rehearse` for trusted migration commands on retained SQLite/PostgreSQL
+  sandboxes, with migration timeout, before/after snapshots, persisted JSON
+  reports and an opt-in removed-table policy.
+- `dbsnap_rehearse` MCP tool with explicit session enablement and per-call
+  approval. Commands run with user privileges and must honor the injected
+  sandbox connection. MySQL/MariaDB rehearsal is deferred.
+
 ## [0.4.3] — 2026-11-04
 
 ### Added

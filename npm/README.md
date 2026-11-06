@@ -91,7 +91,7 @@ the following to your project's `.cursor/mcp.json`:
 Restart your client and ask it to run `dbsnap_status` to confirm the database
 before making changes. The server also exposes tools to create, list, restore,
 and prune snapshots. It resolves the project from its working directory, so
-start it in the project you want to protect. The current source exposes ten tools:
+start it in the project you want to protect. The current source exposes eleven tools:
 
 | MCP tool | Purpose |
 | --- | --- |
@@ -133,6 +133,7 @@ file; review it against the repository's current skill when upgrading.
 | `dbsnap init` | Bind the project to a database. |
 | `dbsnap status` | Check the database and snapshot storage. |
 | `dbsnap save [tag]` | Create a snapshot; the tag is optional. |
+| `dbsnap rehearse before --fail-on-drop-table -- npx prisma migrate deploy` | Rehearse a trusted migration on a retained SQLite/PostgreSQL sandbox. |
 | `dbsnap save before -m "Before migration" --git-branch` | Save with a local note and record the Git branch when available. |
 | `dbsnap tag before baseline` | Rename a snapshot tag. |
 | `dbsnap rm baseline` | Remove a single unpinned snapshot. |
@@ -167,6 +168,15 @@ ambiguous. `rollback` and `restore` without a selector choose the newest
 snapshot, which can be an automatic safety snapshot from a previous restore.
 
 ## Snapshot diff
+
+v0.4.4 rehearsal supplies a sandbox connection to a trusted migrator and
+reports schema/count changes. It retains sandbox resources and before/after
+snapshots for inspection, and discards child output. Verify the migrator
+uses its environment connection. Commands have the user's privileges and
+can select other connections. MCP requires session enablement and per-call
+approval. MySQL/MariaDB rehearsal and automatic sandbox removal are pending.
+See the [rehearsal guide](https://github.com/farhan0431/db-snap/blob/main/docs/REHEARSE.md)
+for timeout limits, exit codes and cleanup.
 
 ```bash
 dbsnap save before
